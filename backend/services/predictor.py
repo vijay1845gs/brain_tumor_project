@@ -1,78 +1,30 @@
+# services/predictor.py — FINAL PRODUCTION VERSION
+
 import torch
 import numpy as np
 from PIL import Image
 import io
 
-from config import get_settings
 from torchvision import transforms
 
-# 🔥 Model builders
-from models.advanced_models import (
-    build_efficient_detection,
-    build_efficient_classification
-)
-from models.resnet_models import (
-    build_resnet_detection,
-    build_resnet_classification,
-    EnsembleDetectionModel
+from config import get_settings
+from services.model_loader import (
+    get_detection_model,
+    get_classification_model,
+    get_device
 )
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 settings = get_settings()
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = get_device()
 
-# ─────────────────────────────────────────────────────────────
-# 🔥 LOAD DETECTION MODEL (WITH ENSEMBLE SUPPORT)
+# ─────────────────────────────────────────────
+# 🔥 LOAD MODELS (SINGLE SOURCE OF TRUTH)
 
-def load_detection_model():
-    try:
-        # Try ensemble first
-        eff_model = build_efficient_detection(
-            "models/detection_efficientnet.pth"
-        ).to(DEVICE)
+detection_model = get_detection_model()
+classification_model = get_classification_model()
 
-        res_model = build_resnet_detection(
-            "models/detection_resnet101.pth"
-        ).to(DEVICE)
-
-        print("✅ Using Ensemble Detection")
-        return EnsembleDetectionModel(eff_model, res_model)
-
-    except Exception as e:
-        print("⚠️ Ensemble unavailable, falling back:", e)
-
-        if settings.DETECTION_MODEL_TYPE == "efficientnet":
-            return build_efficient_detection(
-                settings.MODEL_DETECTION_PATH
-            ).to(DEVICE)
-        else:
-            return build_resnet_detection(
-                settings.MODEL_DETECTION_PATH
-            ).to(DEVICE)
-
-
-# ─────────────────────────────────────────────────────────────
-# 🔥 LOAD CLASSIFICATION MODEL
-
-def load_classification_model():
-    if settings.CLASSIFICATION_MODEL_TYPE == "efficientnet":
-        return build_efficient_classification(
-            settings.MODEL_CLASSIFICATION_PATH
-        ).to(DEVICE)
-    else:
-        return build_resnet_classification(
-            settings.MODEL_CLASSIFICATION_PATH,
-            num_classes=3
-        ).to(DEVICE)
-
-
-# ─────────────────────────────────────────────────────────────
-# 🔥 INITIALIZE MODELS
-
-detection_model = load_detection_model()
-classification_model = load_classification_model()
-
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # 🔥 TRANSFORM
 
 transform = transforms.Compose([
@@ -85,8 +37,8 @@ def preprocess(image):
     return transform(image).unsqueeze(0).to(DEVICE)
 
 
-# ─────────────────────────────────────────────────────────────
-# 🔥 MC DROPOUT (UNCERTAINTY)
+# ─────────────────────────────────────────────
+# 🔥 UNCERTAINTY (MC DROPOUT)
 
 def mc_dropout(model, x, passes=5):
     probs = []
@@ -103,12 +55,12 @@ def mc_dropout(model, x, passes=5):
             probs.append(out.item())
 
         except Exception:
-            probs.append(0.5)  # safe fallback
+            probs.append(0.5)
 
     return float(np.mean(probs)), float(np.std(probs))
 
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # 🔥 MAIN PIPELINE
 
 async def run_prediction(image_bytes):
@@ -117,11 +69,13 @@ async def run_prediction(image_bytes):
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         x = preprocess(image)
 
-        # ── Detection ──
+        # ─────────────────────────
+        # 🧠 DETECTION
+        # ─────────────────────────
         prob, uncertainty = mc_dropout(detection_model, x)
 
         HIGH_THR = settings.CONFIDENCE_THRESHOLD
-        LOW_THR = 0.15  # safety margin
+        LOW_THR = settings.LOW_THRESHOLD
 
         if prob >= HIGH_THR:
             tumor_detected = True
@@ -135,49 +89,57 @@ async def run_prediction(image_bytes):
             tumor_detected = True
             status = "LOW"  # uncertain zone
 
-        # 🔥 FN SAFETY (your logic preserved)
+        # 🔥 FN SAFETY BOOST
         if prob > (HIGH_THR - 0.1) and uncertainty > 0.2:
             tumor_detected = True
 
-        # ── Classification ──
+        # ─────────────────────────
+        # 🧠 CLASSIFICATION
+        # ─────────────────────────
         if tumor_detected:
             try:
                 probs = classification_model.predict_proba(x).cpu().numpy()[0]
                 classes = ["glioma", "meningioma", "pituitary"]
 
-                tumor_type = classes[int(np.argmax(probs))]
-                cls_conf = float(np.max(probs))
+                max_prob = float(np.max(probs))
+
+                if max_prob < settings.CLASSIFICATION_CONF_THRESHOLD:
+                    tumor_type = "uncertain"
+                else:
+                    tumor_type = classes[int(np.argmax(probs))]
 
             except Exception:
                 tumor_type = None
                 probs = None
-                cls_conf = 0.0
-
+                max_prob = 0.0
         else:
             tumor_type = None
             probs = None
-            cls_conf = 0.0
+            max_prob = 0.0
 
-        # ── Reliability ──
+        # ─────────────────────────
+        # 📊 RELIABILITY SCORE
+        # ─────────────────────────
         if status == "LOW":
             reliability = "LOW"
-        elif cls_conf < 0.6:
+        elif max_prob < 0.6:
             reliability = "MEDIUM"
         else:
             reliability = "HIGH"
 
-        # ── Final output ──
+        # ─────────────────────────
+        # 📦 FINAL RESPONSE
+        # ─────────────────────────
         return {
             "tumor_detected": "uncertain" if status == "LOW" else tumor_detected,
             "tumor_type": tumor_type,
-            "confidence": prob,
-            "uncertainty": uncertainty,
+            "confidence": float(prob),
+            "uncertainty": float(uncertainty),
             "reliability": reliability,
-            "all_class_probs": probs
+            "all_class_probs": probs.tolist() if probs is not None else None
         }
 
     except Exception as e:
-        # 🔥 PRODUCTION SAFE RESPONSE
         return {
             "tumor_detected": False,
             "tumor_type": None,

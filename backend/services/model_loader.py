@@ -1,104 +1,160 @@
-"""
-services/model_loader.py  (UPGRADED v2)
-─────────────────────────────────────────
-Extended loader that supports:
-  - ResNet101 models (original v1)
-  - EfficientNet-B4 models (new v2, preferred if weights exist)
-  - Automatic fallback: if EfficientNet weights not found, use ResNet101
-  - Thread-safe singleton pattern
-"""
+# services/model_loader.py — FINAL PRODUCTION VERSION
 
 import os
 import threading
+import logging
 import torch
-from typing import Optional
 
 from config import get_settings
+
 from models.resnet_models import (
-    TumorDetectionModel,
-    TumorClassificationModel,
-    build_detection_model,
-    build_classification_model,
+    build_resnet_detection,
+    build_resnet_classification,
 )
+
 from models.advanced_models import (
-    EfficientDetectionModel,
-    EfficientClassificationModel,
     build_efficient_detection,
     build_efficient_classification,
+    EnsembleDetectionModel,
+    EnsembleClassificationModel,
 )
 
+# ─────────────────────────────────────────────
 settings = get_settings()
-_lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
+_lock = threading.Lock()
 _detection_model = None
 _classification_model = None
-_device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
+# ─────────────────────────────────────────────
+# DEVICE CONTROL
+# ─────────────────────────────────────────────
+def _get_device():
+    if settings.DEVICE == "cpu":
+        return "cpu"
+    elif settings.DEVICE == "cuda":
+        return "cuda"
+    else:
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+_device = _get_device()
+
+
+# ─────────────────────────────────────────────
+# LOAD MODELS
+# ─────────────────────────────────────────────
 def _load_models():
     global _detection_model, _classification_model
 
-    # ── Paths ──────────────────────────────────────────────────────────────────
-    # EfficientNet-B4 weights (preferred — higher accuracy)
-    eff_det_path = "models/detection_efficientnet_b4.pth"
-    eff_cls_path = "models/classification_efficientnet_b4.pth"
+    logger.info("🔄 Loading models...")
 
-    # ResNet101 weights (fallback)
-    res_det_path = settings.MODEL_DETECTION_PATH       # models/detection_resnet101.pth
-    res_cls_path = settings.MODEL_CLASSIFICATION_PATH  # models/classification_resnet101.pth
+    eff_det_path = settings.MODEL_EFF_DET_PATH
+    eff_cls_path = settings.MODEL_EFF_CLS_PATH
 
-    # ── Detection Model ────────────────────────────────────────────────────────
-    if os.path.exists(eff_det_path):
-        print(f"[ModelLoader] 🚀 Loading EfficientNet-B4 detection model from {eff_det_path}")
-        _detection_model = build_efficient_detection(eff_det_path, _device)
-    elif os.path.exists(res_det_path):
-        print(f"[ModelLoader] Loading ResNet101 detection model from {res_det_path}")
-        _detection_model = build_detection_model(res_det_path, _device)
-    else:
-        print("[ModelLoader] ⚠️  No trained detection weights found — using ImageNet pretrained EfficientNet-B4 (demo mode).")
-        _detection_model = build_efficient_detection(None, _device)
+    res_det_path = settings.MODEL_RES_DET_PATH
+    res_cls_path = settings.MODEL_RES_CLS_PATH
 
-    # ── Classification Model ───────────────────────────────────────────────────
-    if os.path.exists(eff_cls_path):
-        print(f"[ModelLoader] 🚀 Loading EfficientNet-B4 classification model from {eff_cls_path}")
-        _classification_model = build_efficient_classification(eff_cls_path, _device)
-    elif os.path.exists(res_cls_path):
-        print(f"[ModelLoader] Loading ResNet101 classification model from {res_cls_path}")
-        _classification_model = build_classification_model(res_cls_path, _device)
-    else:
-        print("[ModelLoader] ⚠️  No trained classification weights found — using ImageNet pretrained EfficientNet-B4 (demo mode).")
-        _classification_model = build_efficient_classification(None, _device)
+    # =========================
+    # DETECTION
+    # =========================
+    try:
+        if settings.ENSEMBLE_ENABLED and os.path.exists(eff_det_path) and os.path.exists(res_det_path):
+            logger.info("🚀 ENSEMBLE Detection (EfficientNet + ResNet)")
 
-    print(f"[ModelLoader] ✅ Models ready on device: {_device}")
+            eff_model = build_efficient_detection(eff_det_path, _device)
+            res_model = build_resnet_detection(res_det_path, _device)
+
+            _detection_model = EnsembleDetectionModel(eff_model, res_model)
+
+        elif os.path.exists(eff_det_path):
+            logger.info("🚀 EfficientNet Detection")
+            _detection_model = build_efficient_detection(eff_det_path, _device)
+
+        elif os.path.exists(res_det_path):
+            logger.info("⚙️ ResNet Detection (fallback)")
+            _detection_model = build_resnet_detection(res_det_path, _device)
+
+        else:
+            logger.warning("⚠️ No detection weights found → using pretrained EfficientNet")
+            _detection_model = build_efficient_detection(None, _device)
+
+    except Exception as e:
+        logger.exception("❌ Detection model failed")
+        raise RuntimeError(f"Detection model error: {e}")
+
+    # =========================
+    # CLASSIFICATION
+    # =========================
+    try:
+        if settings.ENSEMBLE_ENABLED and os.path.exists(eff_cls_path) and os.path.exists(res_cls_path):
+            logger.info("🚀 ENSEMBLE Classification")
+
+            eff_model = build_efficient_classification(eff_cls_path, _device)
+            res_model = build_resnet_classification(res_cls_path, _device)
+
+            _classification_model = EnsembleClassificationModel(eff_model, res_model)
+
+        elif os.path.exists(eff_cls_path):
+            logger.info("🚀 EfficientNet Classification")
+            _classification_model = build_efficient_classification(eff_cls_path, _device)
+
+        elif os.path.exists(res_cls_path):
+            logger.info("⚙️ ResNet Classification (fallback)")
+            _classification_model = build_resnet_classification(res_cls_path, _device)
+
+        else:
+            logger.warning("⚠️ No classification weights found → using pretrained EfficientNet")
+            _classification_model = build_efficient_classification(None, _device)
+
+    except Exception as e:
+        logger.exception("❌ Classification model failed")
+        raise RuntimeError(f"Classification model error: {e}")
+
+    logger.info(f"✅ Models loaded on {_device}")
 
 
+# ─────────────────────────────────────────────
+# PUBLIC ACCESS
+# ─────────────────────────────────────────────
 def get_detection_model():
     global _detection_model
+
     if _detection_model is None:
         with _lock:
             if _detection_model is None:
                 _load_models()
+
     return _detection_model
 
 
 def get_classification_model():
     global _classification_model
+
     if _classification_model is None:
         with _lock:
             if _classification_model is None:
                 _load_models()
+
     return _classification_model
 
 
-def get_device() -> str:
+def get_device():
     return _device
 
 
+# ─────────────────────────────────────────────
+# RELOAD SUPPORT
+# ─────────────────────────────────────────────
 def reload_models():
-    """Force model reload — useful after training new weights."""
     global _detection_model, _classification_model
+
     with _lock:
+        logger.info("🔄 Reloading models...")
         _detection_model = None
         _classification_model = None
         _load_models()
-    print("[ModelLoader] Models reloaded.")
+
+    logger.info("✅ Reload complete")

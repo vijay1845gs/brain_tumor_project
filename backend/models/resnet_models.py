@@ -113,3 +113,16 @@ def build_resnet_classification(weights_path=None, device="cpu"):
     model.to(device)
     model.eval()
     return model
+
+# =========================================================
+# 🔥 BACKWARD COMPATIBILITY (FIX IMPORT ERRORS)
+# =========================================================
+
+TumorDetectionModel = ResNetDetectionModel
+TumorClassificationModel = ResNetClassificationModel
+
+def build_detection_model(weights_path=None, device="cpu"):
+    return build_resnet_detection(weights_path, device)
+
+def build_classification_model(weights_path=None, device="cpu"):
+    return build_resnet_classification(weights_path, device)

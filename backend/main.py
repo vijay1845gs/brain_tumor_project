@@ -11,6 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from routes.predict import router as predict_router
+from routes.report import router as report_router
+from routes.analytics import router as analytics_router
 
 
 @asynccontextmanager
@@ -45,6 +47,8 @@ app.add_middleware(
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(predict_router)
+app.include_router(report_router)
+app.include_router(analytics_router)
 
 
 @app.get("/", tags=["Health"])
@@ -54,7 +58,7 @@ async def root():
         "service": "Brain Tumor Detection API",
         "version": "2.0.0",
         "docs": "/docs",
-        "features": ["prediction", "history", "analytics", "admin", "pdf-reports"],
+        "features": ["prediction", "grad-cam", "risk-analysis", "analytics", "pdf-reports"],
     }
 
 

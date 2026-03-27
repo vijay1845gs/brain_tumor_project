@@ -99,3 +99,37 @@ def build_efficient_classification(weights_path=None, device="cpu"):
     model.to(device)
     model.eval()
     return model
+
+
+# =========================================================
+# 🔥 ENSEMBLE MODELS (PRODUCTION CRITICAL)
+# =========================================================
+
+class EnsembleDetectionModel(nn.Module):
+    def __init__(self, model_a, model_b):
+        super().__init__()
+        self.model_a = model_a
+        self.model_b = model_b
+
+    def predict_proba(self, x):
+        p1 = self.model_a.predict_proba(x)
+        p2 = self.model_b.predict_proba(x)
+        return (p1 + p2) / 2.0
+
+    def forward(self, x):
+        return self.predict_proba(x)
+
+
+class EnsembleClassificationModel(nn.Module):
+    def __init__(self, model_a, model_b):
+        super().__init__()
+        self.model_a = model_a
+        self.model_b = model_b
+
+    def predict_proba(self, x):
+        p1 = self.model_a.predict_proba(x)
+        p2 = self.model_b.predict_proba(x)
+        return (p1 + p2) / 2.0
+
+    def forward(self, x):
+        return self.predict_proba(x)
