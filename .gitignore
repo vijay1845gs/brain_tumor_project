@@ -1,37 +1,64 @@
-# Python
+# ── Python ────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
 .Python
-venv/
-env/
-.env
 *.egg-info/
 dist/
 build/
 .pytest_cache/
 
-# Model weights (large binary files — store separately)
-backend/models/*.pth
+# ── Virtual Environment ───────────────────────────────────────
+venv/
+env/
+.venv/
 
-# Database
+# ── Environment Variables ─────────────────────────────────────
+.env
+*.env
+
+# ── Model Weights (large binary files) ───────────────────────
+backend/models/*.pth
+*.pth
+*.pt
+*.ckpt
+*.h5
+
+# ── Training Plots / Metrics ──────────────────────────────────
+backend/models/*.png
+backend/models/*.json
+
+# ── Database ──────────────────────────────────────────────────
 *.db
 *.sqlite3
 
-# Node
-node_modules/
-dist/
-.DS_Store
-
-# Dataset (too large for git)
+# ── Dataset (too large for git) ───────────────────────────────
 backend/dataset/
+Training/
+Testing/
 raw_dataset/
+dataset/
 
-# IDE
+# ── Node / Frontend ───────────────────────────────────────────
+node_modules/
+frontend/dist/
+frontend/build/
+
+# ── OS ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ───────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
+*.swo
 
-# Logs
+# ── Logs ──────────────────────────────────────────────────────
 *.log
+logs/
+
+# ── Docker ────────────────────────────────────────────────────
+*.tar

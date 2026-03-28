@@ -31,10 +31,10 @@ TUMOR_CLASSES = ["glioma", "meningioma", "pituitary"]
 NO_TUMOR_CLASS = "no_tumor"
 
 RAW_CLASS_MAP = {
-    "glioma_tumor": "glioma",
-    "meningioma_tumor": "meningioma",
-    "pituitary_tumor": "pituitary",
-    "no_tumor": "no_tumor"
+    "glioma": "glioma",
+    "meningioma": "meningioma",
+    "pituitary": "pituitary",
+    "notumor": "no_tumor"
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -49,6 +49,7 @@ def collect_files(src_root: Path):
         for split in ["Training", "Testing"]:
             folder = src_root / split / raw_cls
             if not folder.exists():
+                print(f"  [SKIP] {folder} not found")
                 continue
 
             for file in folder.glob("*"):
