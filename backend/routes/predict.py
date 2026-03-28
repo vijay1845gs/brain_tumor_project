@@ -24,6 +24,13 @@ class PredictionResponse(BaseModel):
     uncertainty: float
     reliability: str
     all_class_probs: Optional[Dict[str, float]] = None
+    heatmap_image: Optional[str] = None       # Grad-CAM++ (primary)
+    heatmap_gradcam: Optional[str] = None      # Grad-CAM++
+    heatmap_eigencam: Optional[str] = None     # EigenCAM
+    risk_level: Optional[str] = None
+    risk_color: Optional[str] = None
+    clinical_note: Optional[str] = None
+    recommendation: Optional[str] = None
     error: Optional[str] = None
 
 

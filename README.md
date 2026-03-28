@@ -1,6 +1,6 @@
 # 🧠 NeuroScan AI — Explainable Brain Tumor Detection System
 
-> **Open, Production-Ready Clinical Decision-Support System for Brain Tumor Detection and Classification using EfficientNet-B4 + Ensemble ResNet101 with Grad-CAM++, Score-CAM, EigenCAM, and MC Dropout Uncertainty Estimation**
+> **Open, Production-Ready Clinical Decision-Support System for Brain Tumor Detection and Classification using EfficientNet-B4 (Detection) + ResNet101 (Classification) with Grad-CAM++, EigenCAM, and MC Dropout Uncertainty Estimation**
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111-green.svg)](https://fastapi.tiangolo.com)
@@ -18,7 +18,7 @@ NeuroScan AI is a full-stack, open-access clinical decision-support system that:
 
 - **Detects** whether an MRI scan contains a brain tumour (binary classification)
 - **Classifies** the tumour type: Glioma, Meningioma, or Pituitary Adenoma
-- **Explains** predictions visually using **Grad-CAM++**, **Score-CAM**, and **EigenCAM** heatmaps
+- **Explains** predictions visually using **Grad-CAM++** and **EigenCAM** heatmaps
 - **Quantifies** uncertainty using **Monte Carlo Dropout** across 5 stochastic forward passes
 - **Provides** WHO-graded clinical risk insights and follow-up recommendations
 - **Generates** downloadable PDF clinical reports
@@ -33,9 +33,9 @@ NeuroScan AI is a full-stack, open-access clinical decision-support system that:
 |---|---|---|
 | Authentication | JWT + bcrypt | ❌ Removed — open API |
 | Database | SQLAlchemy + SQLite | ❌ Removed — stateless |
-| Detection Model | ResNet101 | ✅ EfficientNet-B4 + Ensemble |
-| Classification Model | ResNet101 | ✅ EfficientNet-B4 |
-| Explainability | Grad-CAM++ only | ✅ Grad-CAM++ + Score-CAM + EigenCAM |
+| Detection Model | ResNet101 | ✅ EfficientNet-B4 |
+| Classification Model | ResNet101 | ✅ ResNet101 (trained weights) |
+| Explainability | Grad-CAM++ only | ✅ Grad-CAM++ + EigenCAM |
 | Uncertainty | None | ✅ MC Dropout (5 passes) |
 | Preprocessing | Basic resize + normalize | ✅ CLAHE + Skull Strip + TTA |
 | PDF Reports | Auth-gated | ✅ Open endpoint |
@@ -52,8 +52,8 @@ Browser (React + Vite :3000)
         |  REST / multipart  (no token required)
         v
 FastAPI Backend (:8000)
-   |-- POST /predict/         — MRI upload → full AI pipeline
-   |-- POST /report/          — prediction data → PDF download
+   |-- POST /predict/          — MRI upload → full AI pipeline
+   |-- POST /report/           — prediction data → PDF download
    +-- POST /analytics/summary — scan list → statistics
 ```
 
@@ -73,7 +73,7 @@ Advanced Preprocessing
   └── TTA — 3 versions: original + h-flip + brightness shift
     |
     v
-Tumor Detection (EfficientNet-B4 + Ensemble ResNet101)
+Tumor Detection (EfficientNet-B4)
   ├── MC Dropout — 5 stochastic passes → mean probability + std uncertainty
   ├── HIGH_THR >= 0.4  → tumor_detected = True
   ├── LOW_THR  <= 0.15 → tumor_detected = False
@@ -84,7 +84,7 @@ Tumor Detection (EfficientNet-B4 + Ensemble ResNet101)
 No    Tumor Detected
 Tumor   |
   |     v
-  |   Tumor Classification (EfficientNet-B4)
+  |   Tumor Classification (ResNet101)
   |   ├── 3 classes: glioma / meningioma / pituitary
   |   └── Softmax confidence score
   |     |
@@ -97,8 +97,7 @@ Tumor   |
   |     v
   |   Multi-Method Explainability
   |   ├── Grad-CAM++  — gradient-weighted activation maps
-  |   ├── Score-CAM   — perturbation-based, gradient-free
-  |   └── EigenCAM    — PCA on feature maps
+  |   └── EigenCAM    — PCA on feature maps (gradient-free, stable)
   |     |
   |     v
   +-> WHO-Graded Risk Analysis
@@ -124,16 +123,16 @@ brain_tumor_project/
 |-- docker-compose.yml
 |
 |-- Training/                   # Raw dataset — tracked via Git LFS
-|   |-- glioma/
-|   |-- meningioma/
-|   |-- notumor/
-|   └── pituitary/
+|   |-- glioma/        (3,018 images)
+|   |-- meningioma/    (2,183 images)
+|   |-- notumor/       (1,945 images)
+|   └── pituitary/     (2,504 images)
 |
 |-- Testing/                    # Raw dataset — tracked via Git LFS
-|   |-- glioma/
-|   |-- meningioma/
-|   |-- notumor/
-|   └── pituitary/
+|   |-- glioma/        (755 images)
+|   |-- meningioma/    (546 images)
+|   |-- notumor/       (487 images)
+|   └── pituitary/     (626 images)
 |
 |-- backend/
 |   |-- main.py                 # FastAPI app + CORS + GZip + lifespan
@@ -141,14 +140,14 @@ brain_tumor_project/
 |   |-- requirements.txt
 |   |-- setup_dataset.py        # Raw → train/val/test split builder
 |   |-- train_detection.py      # EfficientNet-B4 detection training
-|   |-- train_classification.py # EfficientNet-B4 classification training
+|   |-- train_classification.py # ResNet101 classification training
 |   |-- generate_graphs.py      # Training metrics visualisation
 |   |-- Dockerfile
 |   |-- .env
 |   |
 |   |-- models/
-|   |   |-- advanced_models.py          # EfficientNet-B4 detection + classification
-|   |   |-- resnet_models.py            # ResNet101 + Ensemble + aliases
+|   |   |-- advanced_models.py          # EfficientNet-B4 detection model
+|   |   |-- resnet_models.py            # ResNet101 classification model + aliases
 |   |   |-- detection_efficientnet.pth  # Trained detection weights (Git LFS)
 |   |   |-- classification_model.pth    # Trained classification weights (Git LFS)
 |   |   |-- metrics.json                # Detection training metrics
@@ -162,7 +161,7 @@ brain_tumor_project/
 |   |
 |   └── services/
 |       |-- preprocessing.py    # CLAHE + skull strip + TTA + normalization
-|       |-- gradcam.py          # Grad-CAM++ + Score-CAM + EigenCAM
+|       |-- gradcam.py          # Grad-CAM++ + EigenCAM
 |       |-- model_loader.py     # Thread-safe singleton model loader
 |       |-- predictor.py        # Full pipeline orchestration + MC Dropout
 |       |-- risk_analysis.py    # WHO-graded risk + confidence upgrading
@@ -196,6 +195,24 @@ brain_tumor_project/
 
 ## Dataset
 
+### Raw Dataset (Training/ + Testing/)
+
+| Folder | Class | Count |
+|---|---|---|
+| Training | glioma | 3,018 |
+| Training | meningioma | 2,183 |
+| Training | notumor | 1,945 |
+| Training | pituitary | 2,504 |
+| **Training Total** | | **9,650** |
+| Testing | glioma | 755 |
+| Testing | meningioma | 546 |
+| Testing | notumor | 487 |
+| Testing | pituitary | 626 |
+| **Testing Total** | | **2,414** |
+| **Grand Total** | | **12,064 images** |
+
+### Processed Dataset (after setup_dataset.py)
+
 | Task | Split | Class | Count |
 |---|---|---|---|
 | Detection | Train | tumor | 2,475 |
@@ -208,7 +225,7 @@ brain_tumor_project/
 | Classification | Val | glioma | 100 |
 | Classification | Val | meningioma | 115 |
 | Classification | Val | pituitary | 74 |
-| **Total** | | | **5,854 images** |
+| **Processed Total** | | | **5,854 images** |
 
 Source: [Brain Tumor MRI Dataset — Kaggle](https://www.kaggle.com/datasets/masoudnickparvar/brain-tumor-mri-dataset)
 
@@ -285,15 +302,15 @@ cd backend
 # Train detection model (EfficientNet-B4)
 venv\Scripts\python.exe train_detection.py --data dataset/detection --model efficientnet --epochs 20 --out models
 
-# Train classification model (EfficientNet-B4)
-venv\Scripts\python.exe train_classification.py --data dataset/classification --model efficientnet --epochs 25 --out models
+# Train classification model (ResNet101)
+venv\Scripts\python.exe train_classification.py --data dataset/classification --model resnet101 --epochs 25 --out models
 ```
 
 Saved weights:
-- `backend/models/detection_efficientnet.pth`
-- `backend/models/classification_model.pth`
+- `backend/models/detection_efficientnet.pth` — EfficientNet-B4 detection
+- `backend/models/classification_model.pth` — ResNet101 classification
 
-The server auto-loads EfficientNet-B4 weights on startup. Falls back to ResNet101 if EfficientNet weights are missing. Falls back to ImageNet pretrained if no weights found (demo mode).
+The server auto-loads weights on startup. Falls back to ImageNet pretrained if no weights found (demo mode).
 
 ---
 
@@ -303,17 +320,25 @@ The server auto-loads EfficientNet-B4 weights on startup. Falls back to ResNet10
 
 Upload an MRI image and receive a full AI analysis.
 
-**Request:** `multipart/form-data` with `file` field (JPEG/PNG/BMP)
+**Request:** `multipart/form-data` with `file` field (JPEG/PNG/BMP, max 10MB)
 
 **Response:**
 ```json
 {
   "tumor_detected": true,
+  "decision_type": "CONFIDENT",
   "tumor_type": "glioma",
   "confidence": 0.921,
   "uncertainty": 0.043,
   "reliability": "HIGH",
-  "all_class_probs": [0.921, 0.054, 0.025]
+  "all_class_probs": { "glioma": 0.921, "meningioma": 0.054, "pituitary": 0.025 },
+  "heatmap_image": "data:image/png;base64,...",
+  "heatmap_gradcam": "data:image/png;base64,...",
+  "heatmap_eigencam": "data:image/png;base64,...",
+  "risk_level": "High",
+  "risk_color": "red",
+  "clinical_note": "...",
+  "recommendation": "..."
 }
 ```
 
@@ -382,7 +407,7 @@ Compute statistics from a list of scan results (stateless — no DB).
 | Precision | > 93% |
 | F1-Score | > 95% |
 
-### Classification (EfficientNet-B4)
+### Classification (ResNet101)
 | Metric | Result |
 |---|---|
 | Accuracy | > 92% |
@@ -392,11 +417,11 @@ Compute statistics from a list of scan results (stateless — no DB).
 
 ## Technologies
 
-**Backend:** FastAPI, PyTorch 2.2, TorchVision, EfficientNet-B4, ResNet101, FPDF2, Pillow, OpenCV, NumPy, scikit-learn
+**Backend:** FastAPI 0.111, PyTorch 2.2, TorchVision 0.17, EfficientNet-B4, ResNet101, FPDF2 2.7.9, Pillow 10.3, OpenCV 4.9, NumPy 1.26, scikit-learn 1.4, Pydantic 2.7
 
-**Frontend:** React 18, Vite, Tailwind CSS, Axios
+**Frontend:** React 18.3, Vite, Tailwind CSS, Axios, Framer Motion, Lucide Icons
 
-**AI:** EfficientNet-B4, ResNet101, Ensemble Detection, Grad-CAM++, Score-CAM, EigenCAM, MC Dropout, CLAHE, Skull Stripping, TTA, FocalLoss, AdamW
+**AI Techniques:** EfficientNet-B4 (detection), ResNet101 (classification), Grad-CAM++, EigenCAM, MC Dropout (5 passes), CLAHE, Skull Strip Simulation, TTA, FocalLoss, AdamW, WHO Risk Grading
 
 **DevOps:** Docker, Git LFS, GitHub
 
@@ -406,13 +431,27 @@ Compute statistics from a list of scan results (stateless — no DB).
 
 Large files are tracked via Git LFS:
 
-| Pattern | Type |
-|---|---|
-| `*.pth` | Model weights (~250MB total) |
-| `Training/**` | Raw training images (~185MB) |
-| `Testing/**` | Raw testing images |
+| Pattern | Type | Size |
+|---|---|---|
+| `*.pth` | Model weights | ~250MB total |
+| `Training/**` | Raw training images | ~185MB |
+| `Testing/**` | Raw testing images | ~46MB |
 
 After cloning, run `git lfs pull` to download all large files.
+
+---
+
+## Configuration (.env)
+
+| Variable | Default | Description |
+|---|---|---|
+| `CONFIDENCE_THRESHOLD` | `0.4` | Detection positive threshold |
+| `LOW_THRESHOLD` | `0.15` | Detection negative threshold |
+| `CLASSIFICATION_CONF_THRESHOLD` | `0.6` | Min confidence for classification |
+| `MODEL_EFF_DET_PATH` | `models/detection_efficientnet.pth` | Detection weights path |
+| `MODEL_RES_CLS_PATH` | `models/classification_model.pth` | Classification weights path |
+| `DEVICE` | `auto` | `auto` / `cpu` / `cuda` |
+| `MAX_FILE_SIZE_MB` | `10` | Max upload size |
 
 ---
 

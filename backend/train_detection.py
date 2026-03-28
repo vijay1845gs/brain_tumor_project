@@ -1,27 +1,35 @@
+# train_detection.py — PRODUCTION GRADE (FINAL)
+
 import os
 import argparse
+import json
 import numpy as np
-import random
 import torch
 import torch.nn as nn
-import torch.optim as optim
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import datasets, transforms
-from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    confusion_matrix, precision_recall_curve, roc_curve
+)
+import matplotlib
+matplotlib.use("Agg")  # 🔥 Fix for headless environments (Colab)
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 from models.advanced_models import EfficientDetectionModel
 from models.resnet_models import TumorDetectionModel
 
+# ─────────────────────────────────────────────
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 IMAGE_SIZE = 224
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 
-# =========================
-# FOCAL LOSS (FN reduction)
-# =========================
+# ─────────────────────────────────────────────
+# 🔥 FOCAL LOSS (FN-FRIENDLY)
+# ─────────────────────────────────────────────
 class FocalLoss(nn.Module):
-    def __init__(self, gamma=2.0, alpha=0.75):
+    def __init__(self, gamma=2.0, alpha=0.7):
         super().__init__()
         self.gamma = gamma
         self.alpha = alpha
@@ -34,97 +42,69 @@ class FocalLoss(nn.Module):
         return (self.alpha * (1 - pt) ** self.gamma * bce).mean()
 
 
-# =========================
-# MIXUP + CUTMIX
-# =========================
-def mixup(x, y, alpha=0.4):
-    lam = np.random.beta(alpha, alpha)
-    idx = torch.randperm(x.size(0)).to(x.device)
-    mixed_x = lam * x + (1 - lam) * x[idx]
-    return mixed_x, y, y[idx], lam
+# ─────────────────────────────────────────────
+# MODEL
+# ─────────────────────────────────────────────
+def get_model(name):
+    if name == "efficientnet":
+        print("🚀 Using EfficientNet")
+        return EfficientDetectionModel(pretrained=True)
+    else:
+        print("🚀 Using ResNet101")
+        return TumorDetectionModel(pretrained=True)
 
 
-def cutmix(x, y, alpha=0.4):
-    lam = np.random.beta(alpha, alpha)
-    bs, _, h, w = x.shape
-    idx = torch.randperm(bs).to(x.device)
-
-    cx, cy = np.random.randint(w), np.random.randint(h)
-    cut_w = int(w * np.sqrt(1 - lam))
-    cut_h = int(h * np.sqrt(1 - lam))
-
-    x1 = np.clip(cx - cut_w // 2, 0, w)
-    x2 = np.clip(cx + cut_w // 2, 0, w)
-    y1 = np.clip(cy - cut_h // 2, 0, h)
-    y2 = np.clip(cy + cut_h // 2, 0, h)
-
-    x[:, :, y1:y2, x1:x2] = x[idx, :, y1:y2, x1:x2]
-    lam = 1 - ((x2 - x1) * (y2 - y1) / (w * h))
-    return x, y, y[idx], lam
-
-
-# =========================
-# DATA
-# =========================
+# ─────────────────────────────────────────────
+# DATA LOADERS
+# ─────────────────────────────────────────────
 def get_loaders(data_dir):
     train_tf = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.RandomCrop(IMAGE_SIZE),
         transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(15),
-        transforms.ColorJitter(0.3, 0.3, 0.2),
+        transforms.RandomRotation(10),
         transforms.ToTensor()
     ])
 
     val_tf = transforms.Compose([
         transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-        transforms.ToTensor()
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
     train_ds = datasets.ImageFolder(os.path.join(data_dir, "train"), train_tf)
-    val_ds = datasets.ImageFolder(os.path.join(data_dir, "val"), val_tf)
+    val_ds   = datasets.ImageFolder(os.path.join(data_dir, "val"), val_tf)
 
     targets = [s[1] for s in train_ds.samples]
     class_counts = np.bincount(targets)
-    weights = 1.0 / class_counts[targets]
 
+    weights = 1.0 / class_counts[targets]
     sampler = WeightedRandomSampler(weights, len(weights))
 
-    return (
-        DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler),
-        DataLoader(val_ds, batch_size=BATCH_SIZE),
-    )
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler)
+    val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE)
+
+    print(f"Train: {len(train_ds)} | Val: {len(val_ds)}")
+    print(f"Class distribution: {class_counts}")
+
+    return train_loader, val_loader
 
 
-# =========================
-# MODEL
-# =========================
-def get_model(name):
-    if name == "efficientnet":
-        return EfficientDetectionModel(pretrained=True)
-    return TumorDetectionModel(pretrained=True)
-
-
-# =========================
+# ─────────────────────────────────────────────
 # TRAIN
-# =========================
-def train_epoch(model, loader, optimizer, criterion):
+# ─────────────────────────────────────────────
+def train(model, loader, optimizer, criterion):
     model.train()
     total_loss = 0
 
     for x, y in loader:
         x, y = x.to(DEVICE), y.to(DEVICE)
 
-        if random.random() < 0.5:
-            x, y_a, y_b, lam = mixup(x, y)
-            outputs = model(x).squeeze(1)
-            loss = lam * criterion(outputs, y_a) + (1 - lam) * criterion(outputs, y_b)
-        else:
-            outputs = model(x).squeeze(1)
-            loss = criterion(outputs, y)
-
         optimizer.zero_grad()
+        out = model(x).squeeze(1)
+        loss = criterion(out, y)
         loss.backward()
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
@@ -133,9 +113,9 @@ def train_epoch(model, loader, optimizer, criterion):
     return total_loss / len(loader)
 
 
-# =========================
-# EVAL (FN-focused)
-# =========================
+# ─────────────────────────────────────────────
+# EVALUATE
+# ─────────────────────────────────────────────
 def evaluate(model, loader):
     model.eval()
     y_true, y_probs = [], []
@@ -149,70 +129,119 @@ def evaluate(model, loader):
             y_probs.extend(probs)
             y_true.extend(y.numpy())
 
-    y_probs = np.array(y_probs)
     y_true = np.array(y_true)
+    y_probs = np.array(y_probs)
 
-    thresholds = np.linspace(0.1, 0.9, 50)
-    best_f1, best_thr = 0, 0.5
+    # 🔥 PR-based threshold (FN-aware)
+    precision, recall, thresholds = precision_recall_curve(y_true, y_probs)
+    f1_scores = 2 * precision * recall / (precision + recall + 1e-8)
 
-    for t in thresholds:
-        preds = (y_probs >= t).astype(int)
-        f1 = f1_score(y_true, preds)
-        if f1 > best_f1:
-            best_f1, best_thr = f1, t
+    best_idx = np.argmax(f1_scores)
+    threshold = thresholds[best_idx] if best_idx < len(thresholds) else 0.5
 
-    preds = (y_probs >= best_thr).astype(int)
+    # 🔥 Lower bound for FN safety
+    threshold = max(threshold, 0.30)
 
-    return (
-        precision_score(y_true, preds),
-        recall_score(y_true, preds),
-        best_f1,
-        confusion_matrix(y_true, preds),
-        best_thr
-    )
+    y_pred = (y_probs >= threshold).astype(int)
+
+    acc = accuracy_score(y_true, y_pred)
+    prec = precision_score(y_true, y_pred)
+    rec = recall_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred)
+    cm = confusion_matrix(y_true, y_pred)
+
+    return acc, prec, rec, f1, cm, y_true, y_probs, y_pred, threshold
 
 
-# =========================
+# ─────────────────────────────────────────────
+# SAVE PLOTS
+# ─────────────────────────────────────────────
+def save_plots(y_true, y_probs, y_pred, name, out_dir):
+    cm = confusion_matrix(y_true, y_pred)
+
+    plt.figure()
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+    plt.title("Confusion Matrix")
+    plt.savefig(f"{out_dir}/{name}_cm.png")
+    plt.close()
+
+    fpr, tpr, _ = roc_curve(y_true, y_probs)
+    plt.figure()
+    plt.plot(fpr, tpr)
+    plt.title("ROC Curve")
+    plt.savefig(f"{out_dir}/{name}_roc.png")
+    plt.close()
+
+    precision, recall, _ = precision_recall_curve(y_true, y_probs)
+    plt.figure()
+    plt.plot(recall, precision)
+    plt.title("PR Curve")
+    plt.savefig(f"{out_dir}/{name}_pr.png")
+    plt.close()
+
+
+# ─────────────────────────────────────────────
 # MAIN
-# =========================
+# ─────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", required=True)
-    parser.add_argument("--model", default="efficientnet")
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=15)
+    parser.add_argument("--model", choices=["efficientnet", "resnet101"], default="efficientnet")
     parser.add_argument("--out", default="models")
-    args = parser.parse_args()
 
+    args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
     train_loader, val_loader = get_loaders(args.data)
     model = get_model(args.model).to(DEVICE)
 
-    optimizer = optim.AdamW(model.parameters(), lr=3e-4)
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=3e-4,
-        steps_per_epoch=len(train_loader),
-        epochs=args.epochs
-    )
-
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
     criterion = FocalLoss()
 
-    best_f1 = 0
+    best_recall = 0
+    metrics_log = []
 
     for epoch in range(args.epochs):
-        loss = train_epoch(model, train_loader, optimizer, criterion)
-        prec, rec, f1, cm, thr = evaluate(model, val_loader)
+        loss = train(model, train_loader, optimizer, criterion)
 
-        scheduler.step()
+        acc, prec, rec, f1, cm, y_true, y_probs, y_pred, thr = evaluate(model, val_loader)
 
-        print(f"Epoch {epoch+1} | Loss {loss:.4f} | F1 {f1:.4f} | Recall {rec:.4f}")
+        tn, fp, fn, tp = cm.ravel()
 
-        if f1 > best_f1:
-            best_f1 = f1
-            torch.save(model.state_dict(), f"{args.out}/best_detection.pth")
-            print("✅ Best model saved")
+        print(f"\nEpoch {epoch+1}")
+        print(f"Loss: {loss:.4f}")
+        print(f"Acc: {acc:.4f} | Prec: {prec:.4f} | Recall: {rec:.4f} | F1: {f1:.4f}")
+        print(f"FN: {fn} | TP: {tp} | Threshold: {thr:.4f}")
 
-    print("Best Threshold:", thr)
+        # ── Save metrics ──
+        metrics = {
+            "epoch": epoch + 1,
+            "loss": loss,
+            "accuracy": acc,
+            "precision": prec,
+            "recall": rec,
+            "f1": f1,
+            "fn": int(fn),
+            "threshold": float(thr)
+        }
+        metrics_log.append(metrics)
+
+        # ── Save best model (RECALL PRIORITY) ──
+        if rec > best_recall:
+            best_recall = rec
+            torch.save(model.state_dict(), f"{args.out}/detection_{args.model}.pth")
+            save_plots(y_true, y_probs, y_pred, args.model, args.out)
+            np.savetxt(f"{args.out}/confusion_matrix.txt", cm, fmt="%d")
+
+            print("✅ Saved best model (based on RECALL)")
+
+        # ── Save metrics.json ──
+        with open(f"{args.out}/metrics.json", "w") as f:
+            json.dump(metrics_log, f, indent=4)
+
+    print("\n🎯 Training Complete")
+    print(f"Best Recall Achieved: {best_recall:.4f}")
 
 
 if __name__ == "__main__":

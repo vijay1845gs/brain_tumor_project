@@ -27,19 +27,17 @@ _SIZE_SECONDARY = 299   # optional larger scale for TTA
 
 _to_tensor_normalize = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize(mean=MEAN, std=STD),
+    # No normalization — models trained without ImageNet normalization
 ])
 
 _tta_flip = transforms.Compose([
     transforms.RandomHorizontalFlip(p=1.0),
     transforms.ToTensor(),
-    transforms.Normalize(mean=MEAN, std=STD),
 ])
 
 _tta_bright = transforms.Compose([
     transforms.ColorJitter(brightness=0.15),
     transforms.ToTensor(),
-    transforms.Normalize(mean=MEAN, std=STD),
 ])
 
 

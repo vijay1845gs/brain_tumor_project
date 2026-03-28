@@ -72,9 +72,9 @@ export default function DashboardPage() {
         {/* Stats row */}
         <div className="grid grid-cols-3 gap-4 mb-8">
           {[
-            { icon: Brain,    label: 'Model',        value: 'ResNet101',   color: 'text-neural-600', bg: 'bg-neural-50' },
-            { icon: Zap,      label: 'Explainability', value: 'Grad-CAM++', color: 'text-amber-600',  bg: 'bg-amber-50'  },
-            { icon: Activity, label: 'Classes',       value: '3 Tumor Types', color: 'text-emerald-600', bg: 'bg-emerald-50' },
+            { icon: Brain,    label: 'Detection Model',    value: 'EfficientNet-B4', color: 'text-neural-600', bg: 'bg-neural-50' },
+            { icon: Zap,      label: 'Classification Model', value: 'ResNet101',       color: 'text-amber-600',  bg: 'bg-amber-50'  },
+            { icon: Activity, label: 'Explainability',       value: 'Grad-CAM++ · EigenCAM', color: 'text-emerald-600', bg: 'bg-emerald-50' },
           ].map(({ icon: Icon, label, value, color, bg }) => (
             <div key={label} className={`card flex items-center gap-3 py-4 ${bg} border-0`}>
               <Icon className={`w-5 h-5 ${color} shrink-0`} />
@@ -155,7 +155,7 @@ export default function DashboardPage() {
                       style={{ animationDelay: `${i * 0.15}s` }} />
                   ))}
                 </div>
-                <p className="text-sm text-slate-500">Running ResNet101 + Grad-CAM++ pipeline…</p>
+                <p className="text-sm text-slate-500">Running EfficientNet-B4 + ResNet101 + Grad-CAM++ + EigenCAM…</p>
                 <p className="text-xs text-slate-400 mt-1">This may take a few seconds</p>
               </div>
             )}
@@ -182,10 +182,10 @@ export default function DashboardPage() {
           <h2 className="font-display text-xl text-slate-900 mb-5">How the AI Pipeline Works</h2>
           <div className="grid sm:grid-cols-4 gap-4">
             {[
-              { step: '01', title: 'Preprocess', desc: 'Resize to 224×224, normalise with ImageNet stats' },
-              { step: '02', title: 'Detect', desc: 'ResNet101 binary classifier: Tumor / No Tumor' },
-              { step: '03', title: 'Classify', desc: 'Identify glioma, meningioma, or pituitary type' },
-              { step: '04', title: 'Explain', desc: 'Grad-CAM++ heatmap highlights decision regions' },
+              { step: '01', title: 'Preprocess', desc: 'CLAHE + Skull Strip + Resize 224×224 + ImageNet normalization' },
+              { step: '02', title: 'Detect',     desc: 'EfficientNet-B4 + MC Dropout uncertainty estimation' },
+              { step: '03', title: 'Classify',   desc: 'ResNet101 — glioma, meningioma, or pituitary' },
+              { step: '04', title: 'Explain',    desc: 'Grad-CAM++ · EigenCAM heatmaps' },
             ].map(({ step, title, desc }) => (
               <div key={step} className="bg-slate-50 rounded-xl p-4">
                 <span className="font-mono text-xs text-neural-400 font-bold">{step}</span>

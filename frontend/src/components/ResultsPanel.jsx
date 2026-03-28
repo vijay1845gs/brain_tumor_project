@@ -1,5 +1,5 @@
 import { Brain, AlertTriangle, CheckCircle, Info, Microscope, FileText,
-         Eye, Download, ShieldAlert, Activity, BarChart3, Zap, Target, GitCompare } from 'lucide-react'
+         Eye, Download, BarChart3, Zap, GitCompare } from 'lucide-react'
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import toast from 'react-hot-toast'
@@ -24,7 +24,7 @@ function ClassProbBar({ label, prob, maxProb }) {
   const color = TUMOR_BAR_COLORS[label] || '#6366f1'
   return (
     <div className="flex items-center gap-3">
-      <span className="text-xs text-slate-500 capitalize w-20 shrink-0">{label.replace('_', ' ')}</span>
+      <span className="text-xs text-slate-500 capitalize w-20 shrink-0">{label}</span>
       <div className="flex-1 h-2.5 bg-slate-100 rounded-full overflow-hidden">
         <motion.div
           initial={{ width: 0 }}
@@ -64,27 +64,30 @@ function UncertaintyGauge({ value, max = 0.3, label }) {
   )
 }
 
+const CAM_TABS = [
+  { id: 'gradcam',  icon: Zap,        label: 'Grad-CAM++', field: 'heatmap_gradcam',  desc: 'Gradient-weighted activation map highlighting decision regions.' },
+  { id: 'eigencam', icon: GitCompare, label: 'EigenCAM',   field: 'heatmap_eigencam', desc: 'PCA on feature maps — robust when gradients are unstable.' },
+]
+
 export default function ResultsPanel({ result }) {
   const [downloading, setDownloading] = useState(false)
-  const [heatmapMode, setHeatmapMode] = useState('gradcam')  // 'gradcam' | 'scorecam' | 'comparison'
+  const [heatmapMode, setHeatmapMode] = useState('gradcam')
   const [opacity, setOpacity] = useState(0.7)
 
   const {
-    tumor_detected, tumor_type, confidence, uncertainty, entropy, reliability,
-    risk_level, clinical_note, recommendation, heatmap_image, scorecam_image,
-    comparison_strip, all_class_probs, tta_agreement
+    tumor_detected, tumor_type, confidence, uncertainty, reliability,
+    risk_level, clinical_note, recommendation, all_class_probs,
+    heatmap_gradcam, heatmap_scorecam, heatmap_eigencam, heatmap_image,
   } = result
 
   const tumorMeta = tumor_type ? TUMOR_META[tumor_type] : null
   const maxProb = all_class_probs ? Math.max(...Object.values(all_class_probs)) : 1
-  const entropyPct = Math.round((entropy || 0) * 100)
-  const ttaAgreementPct = Math.round((tta_agreement || 1) * 100)
 
-  const currentHeatmap = heatmapMode === 'gradcam'
-    ? heatmap_image
-    : heatmapMode === 'scorecam'
-      ? (scorecam_image || heatmap_image)
-      : (comparison_strip || heatmap_image)
+  // available tabs — only show if backend returned that heatmap
+  const availableTabs = CAM_TABS.filter(t => !!result[t.field])
+  const activeTab = availableTabs.find(t => t.id === heatmapMode) || availableTabs[0]
+  const currentHeatmap = activeTab ? result[activeTab.field] : heatmap_image
+  const primaryHeatmap = heatmap_gradcam || heatmap_scorecam || heatmap_eigencam || heatmap_image
 
   const handleDownloadReport = async () => {
     setDownloading(true)
@@ -107,7 +110,8 @@ export default function ResultsPanel({ result }) {
 
   return (
     <div className="space-y-5 animate-slide-up">
-      {/* Download Action */}
+
+      {/* Download */}
       <div className="flex justify-end">
         <button
           onClick={handleDownloadReport}
@@ -118,7 +122,7 @@ export default function ResultsPanel({ result }) {
         </button>
       </div>
 
-      {/* Detection status banner */}
+      {/* Detection banner */}
       <div className={`flex items-center gap-3 p-4 rounded-2xl border ${
         tumor_detected ? 'bg-red-50 border-red-200' : 'bg-green-50 border-green-200'
       }`}>
@@ -147,9 +151,8 @@ export default function ResultsPanel({ result }) {
         </div>
       )}
 
-      {/* Confidence + Metrics Grid */}
+      {/* Confidence + Uncertainty */}
       <div className="card space-y-4">
-        {/* Main confidence */}
         <div>
           <div className="flex justify-between items-end mb-1.5">
             <span className="text-xs font-semibold text-slate-500 uppercase">Detection Confidence</span>
@@ -158,43 +161,52 @@ export default function ResultsPanel({ result }) {
           <ConfidenceBar value={confidence} />
         </div>
 
-        {/* Metrics row */}
         <div className="grid grid-cols-2 gap-3 pt-3 border-t border-slate-50">
+          {/* MC Dropout Uncertainty */}
           <UncertaintyGauge value={uncertainty} max={0.3} label="MC Dropout Uncertainty" />
-          <div>
-            <div className="flex justify-between items-end mb-1">
-              <span className="text-xs font-medium text-slate-500">Shannon Entropy</span>
-              <span className={`text-xs font-mono font-bold ${entropyPct > 50 ? 'text-amber-600' : 'text-emerald-600'}`}>
-                {entropyPct}%
-              </span>
-            </div>
-            <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
-              <motion.div
-                initial={{ width: 0 }}
-                animate={{ width: `${entropyPct}%` }}
-                transition={{ duration: 0.8 }}
-                className={`h-full rounded-full ${entropyPct > 50 ? 'bg-amber-400' : 'bg-emerald-400'}`}
-              />
-            </div>
-          </div>
+
+          {/* Shannon Entropy */}
+          {result.entropy !== undefined && (() => {
+            const entropyPct = Math.round((result.entropy || 0) * 100)
+            return (
+              <div>
+                <div className="flex justify-between items-end mb-1">
+                  <span className="text-xs font-medium text-slate-500">Shannon Entropy</span>
+                  <span className={`text-xs font-mono font-bold ${
+                    entropyPct > 50 ? 'text-amber-600' : 'text-emerald-600'
+                  }`}>{entropyPct}%</span>
+                </div>
+                <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                  <motion.div
+                    initial={{ width: 0 }}
+                    animate={{ width: `${entropyPct}%` }}
+                    transition={{ duration: 0.8 }}
+                    className={`h-full rounded-full ${
+                      entropyPct > 50 ? 'bg-amber-400' : 'bg-emerald-400'
+                    }`}
+                  />
+                </div>
+              </div>
+            )
+          })()}
         </div>
 
         {/* TTA Agreement */}
-        {tta_agreement !== undefined && (
-          <div className="flex items-center justify-between pt-2 border-t border-slate-50">
-            <div className="flex items-center gap-2">
-              <Target className="w-4 h-4 text-violet-500" />
+        {result.tta_agreement !== undefined && (() => {
+          const ttaPct = Math.round((result.tta_agreement || 1) * 100)
+          return (
+            <div className="flex items-center justify-between pt-2 border-t border-slate-50">
               <span className="text-xs font-medium text-slate-500">TTA View Agreement</span>
+              <span className={`text-xs font-mono font-bold ${
+                ttaPct < 70 ? 'text-amber-600' : 'text-emerald-600'
+              }`}>{ttaPct}%</span>
             </div>
-            <span className={`text-xs font-mono font-bold ${ttaAgreementPct < 70 ? 'text-amber-600' : 'text-emerald-600'}`}>
-              {ttaAgreementPct}%
-            </span>
-          </div>
-        )}
+          )
+        })()}
       </div>
 
       {/* Class Probability Bars */}
-      {all_class_probs && Object.keys(all_class_probs).length > 1 && (
+      {all_class_probs && Object.keys(all_class_probs).length > 0 && (
         <div className="card space-y-3">
           <div className="flex items-center gap-2 mb-1">
             <BarChart3 className="w-4 h-4 text-neural-600" />
@@ -208,82 +220,71 @@ export default function ResultsPanel({ result }) {
         </div>
       )}
 
-      {/* Risk Assessment */}
+      {/* Risk */}
       <div className="flex items-center justify-between">
         <span className="text-sm font-medium text-slate-600">Risk Assessment</span>
         <RiskBadge level={risk_level} />
       </div>
 
-      {/* Heatmap / Explainability */}
-      {heatmap_image && (
+      {/* Explainability — 3 CAM tabs */}
+      {primaryHeatmap && (
         <div className="card space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <Eye className="w-4 h-4 text-neural-600" />
               <h3 className="font-semibold text-slate-700 text-sm">Explainability Maps</h3>
             </div>
-            {/* Mode selector */}
-            <div className="flex items-center gap-1 bg-slate-100 rounded-xl p-1">
-              {[
-                { id: 'gradcam', icon: Zap, label: 'Grad-CAM++' },
-                { id: 'scorecam', icon: Activity, label: 'Score-CAM' },
-                ...(comparison_strip ? [{ id: 'comparison', icon: GitCompare, label: 'Compare' }] : []),
-              ].map(({ id, icon: Icon, label }) => (
-                <button
-                  key={id}
-                  onClick={() => setHeatmapMode(id)}
-                  className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                    heatmapMode === id
-                      ? 'bg-white text-neural-700 shadow-sm'
-                      : 'text-slate-500 hover:text-slate-700'
-                  }`}
-                >
-                  <Icon className="w-3 h-3" />
-                  {label}
-                </button>
-              ))}
-            </div>
+
+            {/* Tab switcher — only show available tabs */}
+            {availableTabs.length > 1 && (
+              <div className="flex items-center gap-1 bg-slate-100 rounded-xl p-1">
+                {availableTabs.map(({ id, icon: Icon, label }) => (
+                  <button
+                    key={id}
+                    onClick={() => setHeatmapMode(id)}
+                    className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                      (activeTab?.id === id)
+                        ? 'bg-white text-neural-700 shadow-sm'
+                        : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    <Icon className="w-3 h-3" />
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
-          {/* Intensity slider (not for comparison mode) */}
-          {heatmapMode !== 'comparison' && (
-            <div className="flex items-center gap-3">
-              <label className="text-[10px] uppercase font-bold text-slate-400 shrink-0">Intensity</label>
-              <input
-                type="range" min="0" max="1" step="0.01"
-                value={opacity} onChange={e => setOpacity(parseFloat(e.target.value))}
-                className="flex-1 accent-neural-500"
-              />
-            </div>
-          )}
+          {/* Intensity slider */}
+          <div className="flex items-center gap-3">
+            <label className="text-[10px] uppercase font-bold text-slate-400 shrink-0">Intensity</label>
+            <input
+              type="range" min="0" max="1" step="0.01"
+              value={opacity} onChange={e => setOpacity(parseFloat(e.target.value))}
+              className="flex-1 accent-neural-500"
+            />
+          </div>
 
           <AnimatePresence mode="wait">
             <motion.div
-              key={heatmapMode}
+              key={activeTab?.id}
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 0.2 }}
-              className={`relative rounded-xl overflow-hidden bg-slate-100 border border-slate-100 ${
-                heatmapMode === 'comparison' ? 'aspect-[3/1]' : 'aspect-square'
-              }`}
+              className="relative rounded-xl overflow-hidden bg-slate-100 border border-slate-100 aspect-square"
             >
               <img
                 src={currentHeatmap}
-                alt={heatmapMode === 'comparison' ? 'Original | Grad-CAM++ | Score-CAM' : `${heatmapMode} heatmap`}
-                style={heatmapMode !== 'comparison' ? {
-                  filter: `saturate(${opacity * 2}) brightness(${0.8 + opacity * 0.2})`
-                } : {}}
+                alt={`${activeTab?.label} heatmap`}
+                style={{ filter: `saturate(${opacity * 2}) brightness(${0.8 + opacity * 0.2})` }}
                 className="w-full h-full object-cover transition-all duration-300"
               />
             </motion.div>
           </AnimatePresence>
 
-          <p className="text-xs text-slate-400">
-            {heatmapMode === 'gradcam' && 'Grad-CAM++: gradient-weighted activation map highlighting decision regions.'}
-            {heatmapMode === 'scorecam' && 'Score-CAM: perturbation-based, gradient-free — more faithful localisation.'}
-            {heatmapMode === 'comparison' && 'Left: Original MRI · Centre: Grad-CAM++ · Right: Score-CAM comparison.'}
-          </p>
+          <p className="text-xs text-slate-400">{activeTab?.desc}</p>
         </div>
       )}
 
@@ -309,9 +310,9 @@ export default function ResultsPanel({ result }) {
       <div className="flex items-start gap-2 p-3 bg-slate-50 rounded-xl">
         <Info className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
         <p className="text-xs text-slate-400 leading-relaxed">
-          This AI system (v2: EfficientNet-B4 + TTA + MC Dropout + Score-CAM) is intended as a
-          decision-support tool only. All results must be reviewed and confirmed by a qualified
-          medical professional before any clinical action is taken.
+          This AI system (EfficientNet-B4 + MC Dropout + Grad-CAM++ + Score-CAM + EigenCAM) is intended
+          as a decision-support tool only. All results must be reviewed by a qualified medical professional
+          before any clinical action is taken.
         </p>
       </div>
     </div>

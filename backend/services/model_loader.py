@@ -50,69 +50,46 @@ _device = _get_device()
 def _load_models():
     global _detection_model, _classification_model, _models_loaded
 
+    # Use absolute path relative to this file
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    eff_det_path = os.path.join(base_dir, settings.MODEL_EFF_DET_PATH)
+    res_cls_path = os.path.join(base_dir, settings.MODEL_RES_CLS_PATH)
+
+    print("[DEBUG] base_dir: " + base_dir)
+    print("[DEBUG] eff_det_path: " + eff_det_path)
+    print("[DEBUG] eff_det_exists: " + str(os.path.exists(eff_det_path)))
+    print("[DEBUG] res_cls_path: " + res_cls_path)
+    print("[DEBUG] res_cls_exists: " + str(os.path.exists(res_cls_path)))
+
     logger.info("🔄 Loading models...")
-
-    eff_det_path = settings.MODEL_EFF_DET_PATH
-    eff_cls_path = settings.MODEL_EFF_CLS_PATH
-
-    res_det_path = settings.MODEL_RES_DET_PATH
-    res_cls_path = settings.MODEL_RES_CLS_PATH
 
     # =========================
     # DETECTION
     # =========================
     try:
-        if settings.ENSEMBLE_ENABLED and os.path.exists(eff_det_path) and os.path.exists(res_det_path):
-            logger.info("🚀 ENSEMBLE Detection (EfficientNet + ResNet)")
-
-            eff_model = build_efficient_detection(eff_det_path, _device)
-            res_model = build_resnet_detection(res_det_path, _device)
-
-            _detection_model = EnsembleDetectionModel(eff_model, res_model)
-
-        elif os.path.exists(eff_det_path):
-            logger.info(f"🚀 EfficientNet Detection: {eff_det_path}")
+        if os.path.exists(eff_det_path):
+            logger.info("Loading EfficientNet Detection: " + eff_det_path)
             _detection_model = build_efficient_detection(eff_det_path, _device)
-
-        elif os.path.exists(res_det_path):
-            logger.info(f"⚙️ ResNet Detection (fallback): {res_det_path}")
-            _detection_model = build_resnet_detection(res_det_path, _device)
-
         else:
-            logger.warning("⚠️ No detection weights found → using pretrained EfficientNet")
+            logger.warning("No detection weights found, using pretrained")
             _detection_model = build_efficient_detection(None, _device)
-
     except Exception as e:
-        logger.exception("❌ Detection model failed")
-        raise RuntimeError(f"Detection model error: {e}")
+        logger.exception("Detection model failed")
+        raise RuntimeError("Detection model error: " + str(e))
 
     # =========================
     # CLASSIFICATION
     # =========================
     try:
-        if settings.ENSEMBLE_ENABLED and os.path.exists(eff_cls_path) and os.path.exists(res_cls_path):
-            logger.info("🚀 ENSEMBLE Classification")
-
-            eff_model = build_efficient_classification(eff_cls_path, _device)
-            res_model = build_resnet_classification(res_cls_path, _device)
-
-            _classification_model = EnsembleClassificationModel(eff_model, res_model)
-
-        elif os.path.exists(eff_cls_path):
-            logger.info(f"🚀 EfficientNet Classification: {eff_cls_path}")
-            _classification_model = build_efficient_classification(eff_cls_path, _device)
-
-        elif os.path.exists(res_cls_path):
-            logger.info(f"⚙️ ResNet Classification (fallback): {res_cls_path}")
+        if os.path.exists(res_cls_path):
+            logger.info("Loading ResNet Classification: " + res_cls_path)
             _classification_model = build_resnet_classification(res_cls_path, _device)
-
         else:
-            logger.warning("⚠️ No classification weights found → using pretrained EfficientNet")
+            logger.warning("No classification weights found, using pretrained")
             _classification_model = build_efficient_classification(None, _device)
-
     except Exception as e:
-        logger.exception("❌ Classification model failed")
-        raise RuntimeError(f"Classification model error: {e}")
+        logger.exception("Classification model failed")
+        raise RuntimeError("Classification model error: " + str(e))
 
     _models_loaded = True
     logger.info(f"✅ Models loaded on {_device}")

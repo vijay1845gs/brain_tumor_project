@@ -8,6 +8,18 @@ import os
 class Settings(BaseSettings):
 
     # =========================
+    # 🔐 AUTH SETTINGS
+    # =========================
+    SECRET_KEY: str = "your-very-secret-key-change-in-production-min-32-chars"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+
+    # =========================
+    # 🗄️ DATABASE
+    # =========================
+    DATABASE_URL: str = "sqlite+aiosqlite:///./brain_tumor.db"
+
+    # =========================
     # 🎯 CONFIDENCE SETTINGS
     # =========================
     CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", 0.4))
@@ -33,7 +45,7 @@ class Settings(BaseSettings):
     )
 
     MODEL_RES_CLS_PATH: str = os.getenv(
-        "MODEL_RES_CLS_PATH", "models/classification_resnet101.pth"
+        "MODEL_RES_CLS_PATH", "models/classification_model.pth"
     )
 
     # =========================
@@ -59,6 +71,7 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "ignore"
 
 
 @lru_cache()

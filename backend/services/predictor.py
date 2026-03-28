@@ -13,17 +13,13 @@ from services.model_loader import (
     get_device
 )
 from services.preprocessing import preprocess_for_inference
+from services.gradcam import GradCAMPlusPlus, EigenCAM
+from services.risk_analysis import get_risk_report
 
 # ─────────────────────────────────────────────
 settings = get_settings()
 DEVICE = get_device()
 logger = logging.getLogger(__name__)
-
-# ─────────────────────────────────────────────
-# 🔥 LOAD MODELS (SINGLE SOURCE OF TRUTH)
-
-detection_model = get_detection_model()
-classification_model = get_classification_model()
 
 logger.info(f"✅ Predictor initialized on {DEVICE}")
 
@@ -31,25 +27,23 @@ logger.info(f"✅ Predictor initialized on {DEVICE}")
 def preprocess(image: Image.Image):
     """
     Preprocess image using CLAHE + skull stripping + ImageNet normalization.
-    Returns tensor on the correct device.
+    Returns (tensor, original_np_array).
     """
     tensor, _ = preprocess_for_inference(image, size=224)
-    return tensor.to(DEVICE)
+    return tensor.to(DEVICE), np.array(image.resize((224, 224)))
 
 
 # ─────────────────────────────────────────────
 # 🔥 UNCERTAINTY (MC DROPOUT)
 
 def mc_dropout(model, x, passes=5):
-    """
-    Monte Carlo Dropout inference.
-    Enables dropout for stochastic passes, then restores eval mode.
-    """
     probs = []
-    was_training = model.training
-
     try:
-        model.train()  # enable dropout for stochastic forward passes
+        # only set Dropout layers to train, keep BatchNorm in eval
+        model.eval()
+        for m in model.modules():
+            if isinstance(m, torch.nn.Dropout):
+                m.train()
 
         for _ in range(passes):
             try:
@@ -58,18 +52,14 @@ def mc_dropout(model, x, passes=5):
                         out = model.predict_proba(x)
                     else:
                         out = torch.sigmoid(model(x))
-
-                probs.append(out.item())
-
-            except Exception:
+                probs.append(float(out.detach().cpu().flatten()[0]))
+            except Exception as e:
+                logger.warning("mc_dropout pass failed: " + str(e))
                 probs.append(0.5)
 
         return float(np.mean(probs)), float(np.std(probs))
-
     finally:
-        # 🔥 SAFETY: Always restore original mode
-        if not was_training:
-            model.eval()
+        model.eval()
 
 
 # ─────────────────────────────────────────────
@@ -79,11 +69,14 @@ async def run_prediction(image_bytes):
     try:
         # ── Load image ──
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        x = preprocess(image)
+        x, original_np = preprocess(image)
 
         # ─────────────────────────
         # 🧠 DETECTION
         # ─────────────────────────
+        detection_model = get_detection_model()
+        classification_model = get_classification_model()
+
         prob, uncertainty = mc_dropout(detection_model, x)
         logger.info(f"Detection: prob={prob:.4f}, uncertainty={uncertainty:.4f}")
 
@@ -117,7 +110,7 @@ async def run_prediction(image_bytes):
 
         if tumor_detected:
             try:
-                raw_probs = classification_model.predict_proba(x).cpu().numpy()[0]
+                raw_probs = classification_model.predict_proba(x).detach().cpu().numpy()[0]
                 probs = raw_probs
                 classes = ["glioma", "meningioma", "pituitary"]
 
@@ -171,6 +164,43 @@ async def run_prediction(image_bytes):
         else:
             decision_type = "FALLBACK"
 
+        # ─────────────────────────
+        # 🗺️ EXPLAINABILITY (Grad-CAM++ + EigenCAM)
+        # ─────────────────────────
+        heatmap_gradcam = None
+        heatmap_eigencam = None
+
+        cam_model = classification_model if tumor_detected else detection_model
+        class_idx = None
+        if tumor_detected and tumor_type and tumor_type not in ("uncertain", None):
+            class_idx = ["glioma", "meningioma", "pituitary"].index(tumor_type)
+
+        try:
+            gradcam = GradCAMPlusPlus(cam_model)
+            heatmap_gradcam = gradcam.generate(x, original_np, class_idx=class_idx)
+            gradcam.remove_hooks()
+        except Exception as e:
+            logger.warning(f"Grad-CAM++ failed: {e}")
+
+        try:
+            eigencam = EigenCAM(cam_model)
+            heatmap_eigencam = eigencam.generate(x, original_np, class_idx=class_idx)
+            eigencam.remove_hooks()
+        except Exception as e:
+            logger.warning(f"EigenCAM failed: {e}")
+
+        # Use Grad-CAM++ as primary heatmap, fallback to others if it failed
+        heatmap_image = heatmap_gradcam or heatmap_eigencam
+
+        # ─────────────────────────
+        # 🏥 RISK ANALYSIS
+        # ─────────────────────────
+        risk = get_risk_report(
+            tumor_type=tumor_type if tumor_detected else None,
+            confidence=prob,
+            uncertainty=uncertainty,
+        )
+
         return {
             "tumor_detected": bool(tumor_detected),
             "decision_type": decision_type,
@@ -179,6 +209,13 @@ async def run_prediction(image_bytes):
             "uncertainty": round(float(uncertainty), 6),
             "reliability": reliability,
             "all_class_probs": class_probs_dict,
+            "heatmap_image": heatmap_image,
+            "heatmap_gradcam": heatmap_gradcam,
+            "heatmap_eigencam": heatmap_eigencam,
+            "risk_level": risk.risk_level,
+            "risk_color": risk.risk_color,
+            "clinical_note": risk.clinical_note,
+            "recommendation": risk.recommendation,
         }
 
     except Exception as e:
@@ -191,5 +228,12 @@ async def run_prediction(image_bytes):
             "uncertainty": 1.0,
             "reliability": "LOW",
             "all_class_probs": None,
+            "heatmap_image": None,
+            "heatmap_gradcam": None,
+            "heatmap_eigencam": None,
+            "risk_level": "None",
+            "risk_color": "slate",
+            "clinical_note": "Prediction pipeline failed.",
+            "recommendation": "Please retry or contact support.",
             "error": str(e),
         }
