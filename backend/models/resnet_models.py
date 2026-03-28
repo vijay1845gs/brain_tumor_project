@@ -1,5 +1,6 @@
 # models/resnet_models.py
 
+import os
 import torch
 import torch.nn as nn
 from torchvision import models
@@ -108,7 +109,22 @@ def build_resnet_classification(weights_path=None, device="cpu"):
     model = ResNetClassificationModel(pretrained=(weights_path is None))
 
     if weights_path:
-        model.load_state_dict(torch.load(weights_path, map_location=device))
+        if not os.path.exists(weights_path):
+            raise FileNotFoundError(f"Classification weights not found: {weights_path}")
+        
+        state = torch.load(weights_path, map_location=device, weights_only=True)
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        
+        if missing:
+            print(f"[WARNING] Missing keys in classification model: {len(missing)}")
+            print(f"  First 5: {missing[:5]}")
+        if unexpected:
+            print(f"[WARNING] Unexpected keys in classification model: {len(unexpected)}")
+            print(f"  First 5: {unexpected[:5]}")
+        if not missing and not unexpected:
+            print("[INFO] Classification weights loaded successfully (all keys matched)")
+        else:
+            print("[INFO] Classification weights loaded with warnings")
 
     model.to(device)
     model.eval()
