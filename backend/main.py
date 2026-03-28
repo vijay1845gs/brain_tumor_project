@@ -5,6 +5,7 @@ Run with:
   uvicorn main:app --reload --port 8000
 """
 
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,15 +15,32 @@ from routes.predict import router as predict_router
 from routes.report import router as report_router
 from routes.analytics import router as analytics_router
 
+# ── Logging Configuration ─────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ────────────────────────────────────────────────────────────────
-    print("🧠 Brain Tumor Detection System starting up …")
-    print("✅ System ready.")
+    logger.info("🧠 Brain Tumor Detection System starting up …")
+    # Trigger model loading on startup (lazy loading also supported)
+    try:
+        from services.model_loader import get_detection_model, get_classification_model
+        get_detection_model()
+        get_classification_model()
+        logger.info("✅ Models preloaded successfully.")
+    except Exception as e:
+        logger.warning(f"⚠️ Model preloading failed (will retry on first request): {e}")
+
+    logger.info("✅ System ready.")
     yield
     # ── Shutdown ───────────────────────────────────────────────────────────────
-    print("👋 Shutting down …")
+    logger.info("👋 Shutting down …")
 
 
 app = FastAPI(
@@ -64,4 +82,9 @@ async def root():
 
 @app.get("/health", tags=["Health"])
 async def health():
-    return {"status": "healthy"}
+    from services.model_loader import models_loaded, get_device
+    return {
+        "status": "healthy",
+        "models_loaded": models_loaded(),
+        "device": get_device(),
+    }

@@ -45,16 +45,17 @@ def collect_files(src_root: Path):
     """Collect all files with labels."""
     data = []
 
-    for raw_cls, mapped_cls in RAW_CLASS_MAP.items():
-        for split in ["Training", "Testing"]:
+    print(f"  Scanning: {src_root}")
+    for split in ["Training", "Testing"]:
+        for raw_cls, mapped_cls in RAW_CLASS_MAP.items():
             folder = src_root / split / raw_cls
             if not folder.exists():
-                print(f"  [SKIP] {folder} not found")
+                print(f"  [SKIP] {folder}")
                 continue
-
-            for file in folder.glob("*"):
-                if file.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp"]:
-                    data.append((file, mapped_cls))
+            files = [f for f in folder.iterdir() if f.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp"]]
+            print(f"  [FOUND] {folder} -> {len(files)} images")
+            for file in files:
+                data.append((file, mapped_cls))
 
     return data
 

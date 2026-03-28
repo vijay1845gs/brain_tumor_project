@@ -30,13 +30,36 @@ class GradCAMPlusPlus:
     Grad-CAM++ with improved alpha weighting for more precise localisation.
     """
 
-    def __init__(self, model: torch.nn.Module, target_layer: str = "backbone.layer4"):
+    def __init__(self, model: torch.nn.Module, target_layer: str = None):
         self.model = model
         self.model.eval()
         self._activations: Optional[torch.Tensor] = None
         self._gradients: Optional[torch.Tensor] = None
         self._hooks: list = []
+
+        # Auto-detect correct target layer if not specified
+        if target_layer is None:
+            target_layer = self._detect_target_layer()
+
         self._register_hooks(target_layer)
+
+    def _detect_target_layer(self) -> str:
+        """Detect the correct target layer based on model architecture."""
+        # EfficientNet uses backbone.features
+        if hasattr(self.model, "backbone") and hasattr(self.model.backbone, "features"):
+            return "backbone.features"
+        # ResNet uses backbone.layer4
+        if hasattr(self.model, "backbone") and hasattr(self.model.backbone, "layer4"):
+            return "backbone.layer4"
+        # Ensemble: try model_a first
+        if hasattr(self.model, "model_a"):
+            if hasattr(self.model.model_a, "backbone"):
+                if hasattr(self.model.model_a.backbone, "features"):
+                    return "model_a.backbone.features"
+                if hasattr(self.model.model_a.backbone, "layer4"):
+                    return "model_a.backbone.layer4"
+        # Fallback
+        return "backbone.layer4"
 
     def _get_layer(self, layer_name: str) -> torch.nn.Module:
         layer = self.model
@@ -115,12 +138,29 @@ class ScoreCAM:
     Uses channel activations as perturbation masks.
     """
 
-    def __init__(self, model: torch.nn.Module, target_layer: str = "backbone.layer4"):
+    def __init__(self, model: torch.nn.Module, target_layer: str = None):
         self.model = model
         self.model.eval()
         self._activations: Optional[torch.Tensor] = None
         self._hook_handle = None
+
+        if target_layer is None:
+            target_layer = self._detect_target_layer()
+
         self._register_hook(target_layer)
+
+    def _detect_target_layer(self) -> str:
+        if hasattr(self.model, "backbone") and hasattr(self.model.backbone, "features"):
+            return "backbone.features"
+        if hasattr(self.model, "backbone") and hasattr(self.model.backbone, "layer4"):
+            return "backbone.layer4"
+        if hasattr(self.model, "model_a"):
+            if hasattr(self.model.model_a, "backbone"):
+                if hasattr(self.model.model_a.backbone, "features"):
+                    return "model_a.backbone.features"
+                if hasattr(self.model.model_a.backbone, "layer4"):
+                    return "model_a.backbone.layer4"
+        return "backbone.layer4"
 
     def _get_layer(self, name: str):
         layer = self.model
@@ -204,15 +244,32 @@ class EigenCAM:
     Particularly useful when gradients are unstable.
     """
 
-    def __init__(self, model: torch.nn.Module, target_layer: str = "backbone.layer4"):
+    def __init__(self, model: torch.nn.Module, target_layer: str = None):
         self.model = model
         self.model.eval()
         self._activations: Optional[torch.Tensor] = None
         self._hook_handle = None
+
+        if target_layer is None:
+            target_layer = self._detect_target_layer()
+
         layer = self._get_layer(target_layer)
         self._hook_handle = layer.register_forward_hook(
             lambda m, i, o: setattr(self, "_activations", o.detach())
         )
+
+    def _detect_target_layer(self) -> str:
+        if hasattr(self.model, "backbone") and hasattr(self.model.backbone, "features"):
+            return "backbone.features"
+        if hasattr(self.model, "backbone") and hasattr(self.model.backbone, "layer4"):
+            return "backbone.layer4"
+        if hasattr(self.model, "model_a"):
+            if hasattr(self.model.model_a, "backbone"):
+                if hasattr(self.model.model_a.backbone, "features"):
+                    return "model_a.backbone.features"
+                if hasattr(self.model.model_a.backbone, "layer4"):
+                    return "model_a.backbone.layer4"
+        return "backbone.layer4"
 
     def _get_layer(self, name: str):
         layer = self.model

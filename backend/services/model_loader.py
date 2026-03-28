@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 _detection_model = None
 _classification_model = None
+_models_loaded = False
 
 
 # ─────────────────────────────────────────────
@@ -47,7 +48,7 @@ _device = _get_device()
 # LOAD MODELS
 # ─────────────────────────────────────────────
 def _load_models():
-    global _detection_model, _classification_model
+    global _detection_model, _classification_model, _models_loaded
 
     logger.info("🔄 Loading models...")
 
@@ -70,11 +71,11 @@ def _load_models():
             _detection_model = EnsembleDetectionModel(eff_model, res_model)
 
         elif os.path.exists(eff_det_path):
-            logger.info("🚀 EfficientNet Detection")
+            logger.info(f"🚀 EfficientNet Detection: {eff_det_path}")
             _detection_model = build_efficient_detection(eff_det_path, _device)
 
         elif os.path.exists(res_det_path):
-            logger.info("⚙️ ResNet Detection (fallback)")
+            logger.info(f"⚙️ ResNet Detection (fallback): {res_det_path}")
             _detection_model = build_resnet_detection(res_det_path, _device)
 
         else:
@@ -98,11 +99,11 @@ def _load_models():
             _classification_model = EnsembleClassificationModel(eff_model, res_model)
 
         elif os.path.exists(eff_cls_path):
-            logger.info("🚀 EfficientNet Classification")
+            logger.info(f"🚀 EfficientNet Classification: {eff_cls_path}")
             _classification_model = build_efficient_classification(eff_cls_path, _device)
 
         elif os.path.exists(res_cls_path):
-            logger.info("⚙️ ResNet Classification (fallback)")
+            logger.info(f"⚙️ ResNet Classification (fallback): {res_cls_path}")
             _classification_model = build_resnet_classification(res_cls_path, _device)
 
         else:
@@ -113,6 +114,7 @@ def _load_models():
         logger.exception("❌ Classification model failed")
         raise RuntimeError(f"Classification model error: {e}")
 
+    _models_loaded = True
     logger.info(f"✅ Models loaded on {_device}")
 
 
@@ -145,16 +147,22 @@ def get_device():
     return _device
 
 
+def models_loaded() -> bool:
+    """Check if models have been successfully loaded."""
+    return _models_loaded
+
+
 # ─────────────────────────────────────────────
 # RELOAD SUPPORT
 # ─────────────────────────────────────────────
 def reload_models():
-    global _detection_model, _classification_model
+    global _detection_model, _classification_model, _models_loaded
 
     with _lock:
         logger.info("🔄 Reloading models...")
         _detection_model = None
         _classification_model = None
+        _models_loaded = False
         _load_models()
 
     logger.info("✅ Reload complete")
