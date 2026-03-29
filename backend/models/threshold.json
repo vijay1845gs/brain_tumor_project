@@ -1,0 +1,8 @@
+{
+  "threshold": 0.315853,
+  "epoch": 3,
+  "recall": 0.994808,
+  "f1": 0.993776,
+  "fn": 5,
+  "source": "metrics.json (recall-optimized)"
+}
