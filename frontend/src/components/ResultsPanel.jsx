@@ -1,5 +1,5 @@
 import { Brain, AlertTriangle, CheckCircle, Info, Microscope, FileText,
-         Eye, Download, BarChart3, Zap, GitCompare } from 'lucide-react'
+         Eye, Download, BarChart3, Zap, GitCompare, Activity, Layers } from 'lucide-react'
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import toast from 'react-hot-toast'
@@ -78,10 +78,12 @@ export default function ResultsPanel({ result }) {
     tumor_detected, tumor_type, confidence, uncertainty, reliability,
     risk_level, clinical_note, recommendation, all_class_probs,
     heatmap_gradcam, heatmap_scorecam, heatmap_eigencam, heatmap_image,
+    prediction_entropy, uncertainty_profile,
   } = result
 
   const tumorMeta = tumor_type ? TUMOR_META[tumor_type] : null
   const maxProb = all_class_probs ? Math.max(...Object.values(all_class_probs)) : 1
+  const classificationConfidence = all_class_probs ? Math.max(...Object.values(all_class_probs)) : null
 
   // available tabs — only show if backend returned that heatmap
   const availableTabs = CAM_TABS.filter(t => !!result[t.field])
@@ -153,37 +155,39 @@ export default function ResultsPanel({ result }) {
 
       {/* Confidence + Uncertainty */}
       <div className="card space-y-4">
-        <div>
-          <div className="flex justify-between items-end mb-1.5">
-            <span className="text-xs font-semibold text-slate-500 uppercase">Detection Confidence</span>
-            <span className="text-lg font-display text-neural-600">{(confidence * 100).toFixed(1)}%</span>
+
+        {/* Tumor Detection Confidence */}
+        <ConfidenceBar value={confidence ?? 0} label="Tumor Detection Confidence" />
+
+        {/* Classification Confidence */}
+        {classificationConfidence !== null && (
+          <div className="pt-3 border-t border-slate-50">
+            <ConfidenceBar value={classificationConfidence} label="Classification Confidence" />
           </div>
-          <ConfidenceBar value={confidence} />
-        </div>
+        )}
 
         <div className="grid grid-cols-2 gap-3 pt-3 border-t border-slate-50">
           {/* MC Dropout Uncertainty */}
-          <UncertaintyGauge value={uncertainty} max={0.3} label="MC Dropout Uncertainty" />
+          <UncertaintyGauge value={uncertainty ?? 0} max={0.3} label="MC Dropout Uncertainty" />
 
-          {/* Shannon Entropy */}
-          {result.entropy !== undefined && (() => {
-            const entropyPct = Math.round((result.entropy || 0) * 100)
+          {/* Prediction Entropy */}
+          {prediction_entropy != null && (() => {
+            const entropyPct = Math.round((prediction_entropy) * 100)
+            const isHigh = prediction_entropy > 0.5
             return (
               <div>
                 <div className="flex justify-between items-end mb-1">
-                  <span className="text-xs font-medium text-slate-500">Shannon Entropy</span>
-                  <span className={`text-xs font-mono font-bold ${
-                    entropyPct > 50 ? 'text-amber-600' : 'text-emerald-600'
-                  }`}>{entropyPct}%</span>
+                  <span className="text-xs font-medium text-slate-500">Prediction Entropy</span>
+                  <span className={`text-xs font-mono font-bold ${isHigh ? 'text-amber-600' : 'text-emerald-600'}`}>
+                    {prediction_entropy.toFixed(3)}
+                  </span>
                 </div>
                 <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
                   <motion.div
                     initial={{ width: 0 }}
                     animate={{ width: `${entropyPct}%` }}
                     transition={{ duration: 0.8 }}
-                    className={`h-full rounded-full ${
-                      entropyPct > 50 ? 'bg-amber-400' : 'bg-emerald-400'
-                    }`}
+                    className={`h-full rounded-full ${isHigh ? 'bg-amber-400' : 'bg-emerald-400'}`}
                   />
                 </div>
               </div>
@@ -192,8 +196,8 @@ export default function ResultsPanel({ result }) {
         </div>
 
         {/* TTA Agreement */}
-        {result.tta_agreement !== undefined && (() => {
-          const ttaPct = Math.round((result.tta_agreement || 1) * 100)
+        {result.tta_agreement != null && (() => {
+          const ttaPct = Math.round((result.tta_agreement) * 100)
           return (
             <div className="flex items-center justify-between pt-2 border-t border-slate-50">
               <span className="text-xs font-medium text-slate-500">TTA View Agreement</span>
@@ -204,6 +208,59 @@ export default function ResultsPanel({ result }) {
           )
         })()}
       </div>
+
+      {/* Uncertainty Breakdown */}
+      {uncertainty_profile != null && (
+        <div className="card space-y-3">
+          <div className="flex items-center gap-2 mb-1">
+            <Layers className="w-4 h-4 text-violet-500" />
+            <h3 className="font-semibold text-slate-700 text-sm">Uncertainty Breakdown</h3>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            {/* Aleatoric */}
+            <div className="bg-slate-50 rounded-xl p-3">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs font-medium text-slate-500">Aleatoric</span>
+                {uncertainty_profile?.dominant === 'aleatoric' && (
+                  <span className="text-[10px] font-bold text-violet-600 bg-violet-50 px-1.5 py-0.5 rounded-full">dominant</span>
+                )}
+              </div>
+              <p className="font-mono text-sm font-bold text-slate-700">
+                {uncertainty_profile?.aleatoric != null ? uncertainty_profile.aleatoric.toFixed(3) : '-'}
+              </p>
+              <p className="text-[10px] text-slate-400 mt-0.5">Data uncertainty</p>
+            </div>
+
+            {/* Epistemic */}
+            <div className="bg-slate-50 rounded-xl p-3">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs font-medium text-slate-500">Epistemic</span>
+                {uncertainty_profile?.dominant === 'epistemic' && (
+                  <span className="text-[10px] font-bold text-violet-600 bg-violet-50 px-1.5 py-0.5 rounded-full">dominant</span>
+                )}
+              </div>
+              <p className="font-mono text-sm font-bold text-slate-700">
+                {uncertainty_profile?.epistemic != null ? uncertainty_profile.epistemic.toFixed(3) : '-'}
+              </p>
+              <p className="text-[10px] text-slate-400 mt-0.5">Model uncertainty</p>
+            </div>
+          </div>
+
+          {/* Dominant type bar */}
+          {uncertainty_profile?.dominant && (
+            <div className="flex items-center gap-2 pt-1">
+              <Activity className="w-3.5 h-3.5 text-violet-400" />
+              <span className="text-xs text-slate-500">
+                Dominant source:
+                <span className="font-semibold text-violet-600 ml-1 capitalize">
+                  {uncertainty_profile.dominant}
+                </span>
+              </span>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Class Probability Bars */}
       {all_class_probs && Object.keys(all_class_probs).length > 0 && (

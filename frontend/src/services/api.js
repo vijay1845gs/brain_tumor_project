@@ -14,6 +14,10 @@ export const predictionService = {
     const { data } = await api.post('/predict/', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
+    console.log('[NeuroScan] API response:', JSON.stringify({
+      prediction_entropy: data.prediction_entropy,
+      uncertainty_profile: data.uncertainty_profile,
+    }, null, 2))
     return data
   },
 

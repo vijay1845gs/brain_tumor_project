@@ -6,11 +6,9 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
-      '/auth': 'http://localhost:8000',
       '/predict': 'http://localhost:8000',
-      '/history': 'http://localhost:8000',
+      '/report': 'http://localhost:8000',
       '/analytics': 'http://localhost:8000',
-      '/users': 'http://localhost:8000',
       '/health': 'http://localhost:8000',
     }
   }

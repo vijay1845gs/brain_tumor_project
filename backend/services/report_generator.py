@@ -16,7 +16,7 @@ class ClinicalReport(FPDF):
         # Logo placeholder or Title
         self.set_font("Helvetica", "B", 20)
         self.set_text_color(79, 70, 229)  # Neural-600 color
-        self.cell(0, 10, "NeuroScan AI — Clinical Report", ln=True, align="C")
+        self.cell(0, 10, "NeuroScan AI - Clinical Report", ln=True, align="C")
         self.set_font("Helvetica", "I", 10)
         self.set_text_color(100, 100, 100)
         self.cell(0, 10, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True, align="C")
@@ -100,13 +100,13 @@ def generate_pdf_report(
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(0, 8, "Clinical Notes:", ln=True)
     pdf.set_font("Helvetica", "", 10)
-    pdf.multi_cell(0, 6, prediction_data['clinical_note'])
+    pdf.multi_cell(0, 6, prediction_data['clinical_note'].encode('latin-1', 'replace').decode('latin-1'))
     pdf.ln(2)
     
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(0, 8, "Recommendations:", ln=True)
     pdf.set_font("Helvetica", "", 10)
-    pdf.multi_cell(0, 6, prediction_data['recommendation'])
+    pdf.multi_cell(0, 6, prediction_data['recommendation'].encode('latin-1', 'replace').decode('latin-1'))
     
     # ── Disclaimer ────────────────────────────────────────────────────────────
     pdf.ln(10)

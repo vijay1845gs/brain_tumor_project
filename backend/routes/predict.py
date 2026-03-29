@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pydantic import BaseModel
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 import logging
 
 from config import get_settings
@@ -16,17 +16,25 @@ settings = get_settings()
 # ─────────────────────────────────────────────
 # RESPONSE MODEL
 # ─────────────────────────────────────────────
+class UncertaintyProfile(BaseModel):
+    aleatoric: float
+    epistemic: float
+    dominant: str
+
+
 class PredictionResponse(BaseModel):
     tumor_detected: bool
     decision_type: str                  # CONFIDENT | UNCERTAIN | FALLBACK | ERROR
     tumor_type: Optional[str] = None
     confidence: float
     uncertainty: float
+    prediction_entropy: Optional[float] = None
+    uncertainty_profile: Optional[UncertaintyProfile] = None
     reliability: str
     all_class_probs: Optional[Dict[str, float]] = None
-    heatmap_image: Optional[str] = None       # Grad-CAM++ (primary)
-    heatmap_gradcam: Optional[str] = None      # Grad-CAM++
-    heatmap_eigencam: Optional[str] = None     # EigenCAM
+    heatmap_image: Optional[str] = None
+    heatmap_gradcam: Optional[str] = None
+    heatmap_eigencam: Optional[str] = None
     risk_level: Optional[str] = None
     risk_color: Optional[str] = None
     clinical_note: Optional[str] = None

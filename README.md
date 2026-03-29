@@ -213,21 +213,36 @@ brain_tumor_project/
 
 ### Processed Dataset (after setup_dataset.py)
 
-| Task | Split | Class | Count |
-|---|---|---|---|
-| Detection | Train | tumor | 2,475 |
-| Detection | Train | no_tumor | 395 |
-| Detection | Val | tumor | 115 |
-| Detection | Val | no_tumor | 105 |
-| Classification | Train | glioma | 826 |
-| Classification | Train | meningioma | 822 |
-| Classification | Train | pituitary | 827 |
-| Classification | Val | glioma | 100 |
-| Classification | Val | meningioma | 115 |
-| Classification | Val | pituitary | 74 |
-| **Processed Total** | | | **5,854 images** |
+#### Detection (tumor vs no_tumor)
 
-Source: [Brain Tumor MRI Dataset — Kaggle](https://www.kaggle.com/datasets/masoudnickparvar/brain-tumor-mri-dataset)
+| Split | Class | Count |
+|---|---|---|
+| Train | tumor | 7,705 |
+| Train | no_tumor | 1,946 |
+| Val | tumor | 963 |
+| Val | no_tumor | 243 |
+| Test | tumor | 964 |
+| Test | no_tumor | 243 |
+| **Detection Total** | | **12,064** |
+
+#### Classification (glioma / meningioma / pituitary)
+
+| Split | Class | Count |
+|---|---|---|
+| Train | glioma | 3,018 |
+| Train | meningioma | 2,183 |
+| Train | pituitary | 2,504 |
+| Val | glioma | 377 |
+| Val | meningioma | 273 |
+| Val | pituitary | 313 |
+| Test | glioma | 378 |
+| Test | meningioma | 273 |
+| Test | pituitary | 313 |
+| **Classification Total** | | **9,632** |
+
+> Note: Detection and Classification use the same source images organised differently — totals are not additive.
+
+Source: [Brain Tumor MRI Dataset — Mendeley Data](https://data.mendeley.com/datasets/zwr4ntf94j/1)
 
 ---
 
