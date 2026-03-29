@@ -61,7 +61,7 @@ def _load_models():
     print("[DEBUG] res_cls_path: " + res_cls_path)
     print("[DEBUG] res_cls_exists: " + str(os.path.exists(res_cls_path)))
 
-    logger.info("🔄 Loading models...")
+    logger.info("Loading models...")
 
     # =========================
     # DETECTION
@@ -92,7 +92,7 @@ def _load_models():
         raise RuntimeError("Classification model error: " + str(e))
 
     _models_loaded = True
-    logger.info(f"✅ Models loaded on {_device}")
+    logger.info(f"Models loaded on {_device}")
 
 
 # ─────────────────────────────────────────────
@@ -136,10 +136,10 @@ def reload_models():
     global _detection_model, _classification_model, _models_loaded
 
     with _lock:
-        logger.info("🔄 Reloading models...")
+        logger.info("Reloading models...")
         _detection_model = None
         _classification_model = None
         _models_loaded = False
         _load_models()
 
-    logger.info("✅ Reload complete")
+    logger.info("Reload complete")

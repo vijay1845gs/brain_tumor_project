@@ -1,6 +1,7 @@
-# services/predictor.py — FINAL PRODUCTION VERSION (CLAUDE + CALIBRATION + ENTROPY)
+# services/predictor.py — FINAL STABLE VERSION (NO CALIBRATION)
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 from PIL import Image
 import io
@@ -16,22 +17,23 @@ from services.model_loader import (
 )
 from services.preprocessing import preprocess_for_inference
 from services.gradcam import GradCAMPlusPlus, EigenCAM
-from services.calibration import calibrate_classification_probs
 
 # ─────────────────────────────────────────────
 settings = get_settings()
 DEVICE = get_device()
 logger = logging.getLogger(__name__)
 
-logger.info(f"✅ Predictor initialized on {DEVICE}")
+logger.info(f"Predictor initialized on {DEVICE}")
 
 
 # ─────────────────────────────────────────────
 # PREPROCESS
 # ─────────────────────────────────────────────
 def preprocess(image: Image.Image):
-    tensor, _ = preprocess_for_inference(image, size=224)
-    return tensor.to(DEVICE), np.array(image.resize((224, 224)))
+    tensor, np_processed = preprocess_for_inference(image, size=224)
+    # np_processed is the CLAHE+skull-stripped image — use this for CAM overlay
+    # so the heatmap aligns with what the model actually saw
+    return tensor.to(DEVICE), np_processed
 
 
 # ─────────────────────────────────────────────
@@ -92,7 +94,7 @@ async def run_prediction(image_bytes):
             tumor_detected = True
             status = "LOW"
 
-        # ───────── CLASSIFICATION (CALIBRATED) ─────────
+        # ───────── CLASSIFICATION (NO CALIBRATION) ─────────
         tumor_type = None
         probs = None
         max_prob = 0.0
@@ -100,26 +102,32 @@ async def run_prediction(image_bytes):
 
         if tumor_detected:
             try:
-                # RAW LOGITS
                 logits = classification_model(x)
 
-                # CALIBRATION
-                calibrated_probs = calibrate_classification_probs(
-                    logits,
-                    cus=uncertainty
-                )
+                # LOGIT NORMALIZATION + TEMPERATURE SCALING
+                # Raw logits can have extreme spread (e.g. [-1055, 269, -367])
+                # Normalize to zero-mean unit-std before softmax so probabilities
+                # are meaningful and entropy is non-zero for confident predictions
+                raw_logits_np = logits.detach().cpu().numpy()[0]
+                logits_np = raw_logits_np.astype(np.float64)
+                logits_np = (logits_np - logits_np.mean()) / (logits_np.std() + 1e-8)
+                logits_norm = torch.tensor(logits_np, dtype=torch.float32).unsqueeze(0)
 
-                probs = calibrated_probs
+                T = 1.5
+                probs = F.softmax(logits_norm / T, dim=1).detach().cpu().numpy()[0]
+
+                # Clamp to valid probability range before entropy
+                probs = np.clip(probs, 1e-6, 1.0)
+                probs = probs / probs.sum()
+
                 classes = ["glioma", "meningioma", "pituitary"]
 
-                max_prob = float(np.max(calibrated_probs))
-                predicted_class = classes[int(np.argmax(calibrated_probs))]
+                max_prob = float(np.max(probs))
+                predicted_class = classes[int(np.argmax(probs))]
 
-                # 🔥 ENTROPY (NEW)
-                entropy_raw = -np.sum(
-                    calibrated_probs * np.log(calibrated_probs + 1e-8)
-                )
-                entropy = float(entropy_raw / math.log(len(classes)))  # normalized
+                # ENTROPY (ALEATORIC UNCERTAINTY)
+                entropy_raw = -np.sum(probs * np.log(probs))
+                entropy = float(entropy_raw / math.log(len(classes)))
 
                 if max_prob < settings.CLASSIFICATION_CONF_THRESHOLD:
                     tumor_type = "uncertain"
@@ -158,21 +166,31 @@ async def run_prediction(image_bytes):
         heatmap_eigencam = None
 
         cam_model = classification_model if tumor_detected else detection_model
-        class_idx = None
 
+        # class_idx must match what the raw model outputs (not normalized logits)
+        # Use raw argmax from classification_model directly
+        cam_class_idx = None
         if tumor_detected and tumor_type not in ("uncertain", None):
-            class_idx = ["glioma", "meningioma", "pituitary"].index(tumor_type)
+            cam_class_idx = ["glioma", "meningioma", "pituitary"].index(tumor_type)
+            # Verify against raw model output to ensure consistency
+            with torch.no_grad():
+                raw_out = classification_model(x)
+                raw_argmax = int(raw_out.argmax(dim=1).item())
+            # If raw model disagrees with normalized prediction, trust raw argmax
+            # so Grad-CAM backpropagates on the class the model actually activates for
+            if raw_argmax != cam_class_idx:
+                cam_class_idx = raw_argmax
 
         try:
             gradcam = GradCAMPlusPlus(cam_model)
-            heatmap_gradcam = gradcam.generate(x, original_np, class_idx=class_idx)
+            heatmap_gradcam = gradcam.generate(x, original_np, class_idx=cam_class_idx)
             gradcam.remove_hooks()
         except Exception:
             pass
 
         try:
             eigencam = EigenCAM(cam_model)
-            heatmap_eigencam = eigencam.generate(x, original_np, class_idx=class_idx)
+            heatmap_eigencam = eigencam.generate(x, original_np, class_idx=cam_class_idx)
             eigencam.remove_hooks()
         except Exception:
             pass
@@ -186,18 +204,18 @@ async def run_prediction(image_bytes):
             uncertainty=uncertainty,
         )
 
-        # 🔥 ENTROPY CALCULATION
+        # ENTROPY OUTPUT
         prediction_entropy = round(float(entropy), 4) if entropy is not None else None
 
-        # 🔥 UNCERTAINTY PROFILE
+        # UNCERTAINTY PROFILE
         if prediction_entropy is not None:
             aleatoric = prediction_entropy
             epistemic = round(float(uncertainty), 4)
-            dominant  = "aleatoric" if aleatoric > epistemic else "epistemic"
+            dominant = "aleatoric" if aleatoric > epistemic else "epistemic"
             uncertainty_profile = {
                 "aleatoric": aleatoric,
                 "epistemic": epistemic,
-                "dominant":  dominant,
+                "dominant": dominant,
             }
         else:
             uncertainty_profile = None
@@ -210,7 +228,6 @@ async def run_prediction(image_bytes):
             "uncertainty": round(float(uncertainty), 6),
             "prediction_entropy": prediction_entropy,
             "uncertainty_profile": uncertainty_profile,
-
             "reliability": reliability,
             "all_class_probs": class_probs_dict,
             "heatmap_image": heatmap_image,

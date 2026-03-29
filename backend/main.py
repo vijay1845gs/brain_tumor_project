@@ -27,20 +27,20 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ────────────────────────────────────────────────────────────────
-    logger.info("🧠 Brain Tumor Detection System starting up …")
+    logger.info("Brain Tumor Detection System starting up...")
     # Trigger model loading on startup (lazy loading also supported)
     try:
         from services.model_loader import get_detection_model, get_classification_model
         get_detection_model()
         get_classification_model()
-        logger.info("✅ Models preloaded successfully.")
+        logger.info("Models preloaded successfully.")
     except Exception as e:
-        logger.warning(f"⚠️ Model preloading failed (will retry on first request): {e}")
+        logger.warning(f"Model preloading failed (will retry on first request): {e}")
 
-    logger.info("✅ System ready.")
+    logger.info("System ready.")
     yield
     # ── Shutdown ───────────────────────────────────────────────────────────────
-    logger.info("👋 Shutting down …")
+    logger.info("Shutting down...")
 
 
 app = FastAPI(

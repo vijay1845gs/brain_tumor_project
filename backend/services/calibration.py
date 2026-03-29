@@ -1,134 +1,195 @@
-# services/calibration.py
 """
-Post-hoc calibration utilities.
-No retraining required. Applied at inference time only.
+services/calibration.py — PRODUCTION UPGRADE v3
+─────────────────────────────────────────────────
+Changes from v2:
+  - calibrate_classification_probs() accepts override_temperature parameter
+    so predictor can inject the file-loaded temperature at call time.
+  - fit_temperature() utility added: can be run offline on a validation set
+    to produce models/calibration.json without retraining.
+  - ECE computation unchanged (correct).
+  - Adaptive temperature logic retained but now uses override when provided.
 
-Temperature Scaling:
-    Divides logits by temperature T before softmax.
-    T > 1  →  softens distribution (reduces overconfidence)
-    T = 1  →  original softmax (no change)
-    T < 1  →  sharpens distribution (increases confidence)
-
-CUS-Adaptive Temperature:
-    Increases T dynamically when cascade uncertainty is high,
-    ensuring high-uncertainty predictions are never overconfident.
+Usage (offline calibration fitting — no GPU needed):
+    from services.calibration import fit_temperature_from_val
+    fit_temperature_from_val(model, val_loader, device="cpu", out_path="models/calibration.json")
 """
 
+import json
+import logging
 import numpy as np
 import torch
 import torch.nn.functional as F
-from typing import Union
+from pathlib import Path
+from typing import Optional
 
+logger = logging.getLogger(__name__)
 
-# ── Default temperature (tuned for ResNet101 on medical imaging) ──────────────
-# Set between 1.5 and 3.0 without a validation set.
-# 2.0 is a safe, well-documented starting point for medical imaging classifiers.
-# See: Guo et al., "On Calibration of Modern Neural Networks", ICML 2017.
+# ── Constants ──────────────────────────────────────────────────────────────────
 DEFAULT_TEMPERATURE = 2.0
-
-# ── Label smoothing epsilon ───────────────────────────────────────────────────
-# Ensures no class ever receives probability 0.0 or 1.0.
-# Standard value in production medical AI: 0.05–0.10
-SMOOTHING_EPSILON = 0.05
-
-# ── CUS thresholds for adaptive temperature ───────────────────────────────────
-CUS_LOW      = 0.05   # below this: use DEFAULT_TEMPERATURE
-CUS_MODERATE = 0.10   # above this: use HIGH_TEMPERATURE
-HIGH_TEMPERATURE = 4.0
+SMOOTHING_EPSILON   = 0.05
+CUS_LOW             = 0.05
+CUS_MODERATE        = 0.10
+HIGH_TEMPERATURE    = 4.0
 
 
-def get_adaptive_temperature(cus: float) -> float:
+# ── Adaptive temperature (CUS-based) ──────────────────────────────────────────
+
+def get_adaptive_temperature(cus: float, base_temperature: float = DEFAULT_TEMPERATURE) -> float:
     """
-    Returns calibration temperature based on Cascade Uncertainty Score.
-    Higher CUS → higher temperature → softer, more honest distribution.
+    Returns calibration temperature based on MC Dropout uncertainty (CUS).
+    If a base_temperature is provided (from file), it replaces DEFAULT_TEMPERATURE.
     """
     if cus <= CUS_LOW:
-        return DEFAULT_TEMPERATURE
+        return base_temperature
     if cus >= CUS_MODERATE:
         return HIGH_TEMPERATURE
-    # Linear interpolation between DEFAULT and HIGH
     ratio = (cus - CUS_LOW) / (CUS_MODERATE - CUS_LOW)
-    return DEFAULT_TEMPERATURE + ratio * (HIGH_TEMPERATURE - DEFAULT_TEMPERATURE)
+    return base_temperature + ratio * (HIGH_TEMPERATURE - base_temperature)
 
+
+# ── Temperature scaling ────────────────────────────────────────────────────────
 
 def temperature_scale_logits(
     logits: torch.Tensor,
-    temperature: float
+    temperature: float,
 ) -> np.ndarray:
     """
-    Apply temperature scaling to raw logits and return calibrated softmax.
+    Apply temperature scaling to raw logits, return calibrated softmax probabilities.
 
     Args:
-        logits      : raw output from classification model, shape (1, num_classes)
-        temperature : scaling factor > 0
+        logits      : raw model output, shape (1, num_classes)
+        temperature : positive scaling factor
 
     Returns:
-        calibrated probabilities as numpy array, shape (num_classes,)
+        numpy array of shape (num_classes,)
     """
     if temperature <= 0:
-        raise ValueError(f"Temperature must be positive, got {temperature}")
-
-    scaled_logits = logits / temperature
-    probs = F.softmax(scaled_logits, dim=1)
+        raise ValueError(f"Temperature must be > 0, got {temperature}")
+    scaled = logits.float() / temperature
+    probs = F.softmax(scaled, dim=1)
     return probs.detach().cpu().numpy()[0]
 
 
+# ── Label smoothing ────────────────────────────────────────────────────────────
+
 def smooth_probabilities(
     probs: np.ndarray,
-    epsilon: float = SMOOTHING_EPSILON
+    epsilon: float = SMOOTHING_EPSILON,
 ) -> np.ndarray:
     """
-    Apply label smoothing to a probability vector.
-    Prevents hard 0.0 and 1.0 outputs.
-
-    Formula: p_smooth = (1 - epsilon) * p + epsilon / K
-    where K is the number of classes.
-
-    Args:
-        probs   : probability vector, shape (K,), must sum to ~1.0
-        epsilon : smoothing factor (0.05 recommended)
-
-    Returns:
-        smoothed probability vector, shape (K,)
+    Apply label smoothing: p_smooth = (1 - ε) * p + ε / K
+    Prevents overconfident 0.0/1.0 outputs.
     """
     K = len(probs)
     smoothed = (1.0 - epsilon) * probs + epsilon / K
-    # Renormalize to ensure exact sum = 1.0 despite floating point
     smoothed = smoothed / smoothed.sum()
     return smoothed.astype(np.float32)
 
+
+# ── Main calibration entry point ───────────────────────────────────────────────
 
 def calibrate_classification_probs(
     logits: torch.Tensor,
     cus: float,
     epsilon: float = SMOOTHING_EPSILON,
+    override_temperature: Optional[float] = None,
 ) -> np.ndarray:
     """
     Full calibration pipeline: temperature scaling → label smoothing.
-    This is the single entry point called from predictor.py.
 
     Args:
-        logits  : raw logits from classification model, shape (1, num_classes)
-        cus     : Cascade Uncertainty Score (float)
-        epsilon : smoothing factor
+        logits               : raw logits from classification model, shape (1, C)
+        cus                  : Cascade Uncertainty Score from MC Dropout
+        epsilon              : label smoothing factor
+        override_temperature : if provided, uses this as the base temperature
+                               instead of DEFAULT_TEMPERATURE. Pass the value
+                               loaded from models/calibration.json.
 
     Returns:
-        calibrated, smoothed probability vector, shape (num_classes,)
+        calibrated + smoothed probability vector, shape (C,)
     """
-    T = get_adaptive_temperature(cus)
+    base_T = override_temperature if override_temperature is not None else DEFAULT_TEMPERATURE
+    T = get_adaptive_temperature(cus, base_temperature=base_T)
     probs = temperature_scale_logits(logits, T)
     probs = smooth_probabilities(probs, epsilon)
     return probs
 
 
+# ── Offline calibration fitting (no retraining) ────────────────────────────────
+
+def fit_temperature_from_val(
+    model: torch.nn.Module,
+    val_loader,
+    device: str = "cpu",
+    out_path: str = "models/calibration.json",
+    num_classes: int = 3,
+) -> float:
+    """
+    Fit optimal temperature on a validation DataLoader using NLL minimization.
+    Saves result to out_path as JSON.
+
+    This requires ONLY a forward pass (no retraining, no GPU needed).
+    Run once offline, then the predictor loads the result automatically.
+
+    Args:
+        model      : trained classification model (in eval mode)
+        val_loader : DataLoader yielding (images, labels)
+        device     : "cpu" or "cuda"
+        out_path   : path to save calibration.json
+        num_classes: number of output classes
+
+    Returns:
+        optimal temperature (float)
+    """
+    from scipy.optimize import minimize_scalar
+
+    model.eval()
+    model.to(device)
+
+    all_logits = []
+    all_labels = []
+
+    with torch.no_grad():
+        for images, labels in val_loader:
+            images = images.to(device)
+            logits = model(images)
+            all_logits.append(logits.cpu())
+            all_labels.append(labels.cpu())
+
+    logits_cat = torch.cat(all_logits, dim=0)  # (N, C)
+    labels_cat = torch.cat(all_labels, dim=0)  # (N,)
+
+    def nll_loss(T: float) -> float:
+        if T <= 0:
+            return 1e9
+        scaled = logits_cat / T
+        log_probs = F.log_softmax(scaled, dim=1)
+        nll = F.nll_loss(log_probs, labels_cat)
+        return float(nll.item())
+
+    result = minimize_scalar(nll_loss, bounds=(0.1, 10.0), method="bounded")
+    optimal_T = float(result.x)
+
+    logger.info(f"Optimal calibration temperature: {optimal_T:.4f}")
+
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w") as f:
+        json.dump({"temperature": optimal_T}, f, indent=2)
+    logger.info(f"Saved calibration temperature to {out_path}")
+
+    return optimal_T
+
+
+# ── ECE evaluation ─────────────────────────────────────────────────────────────
+
 def expected_calibration_error(
     confidences: np.ndarray,
-    accuracies:  np.ndarray,
+    accuracies: np.ndarray,
     n_bins: int = 10,
 ) -> float:
     """
-    Compute Expected Calibration Error (ECE) for evaluation.
-    Use this in your evaluation script to quantify calibration improvement.
+    Compute Expected Calibration Error (ECE).
 
     Args:
         confidences : max predicted probability per sample, shape (N,)
@@ -136,19 +197,19 @@ def expected_calibration_error(
         n_bins      : number of equal-width bins
 
     Returns:
-        ECE (float) — lower is better, 0.0 is perfect calibration
+        ECE (float) — lower is better, 0.0 = perfect calibration
     """
     bin_boundaries = np.linspace(0.0, 1.0, n_bins + 1)
     ece = 0.0
-    N   = len(confidences)
+    N = len(confidences)
 
     for i in range(n_bins):
         lo, hi = bin_boundaries[i], bin_boundaries[i + 1]
-        mask   = (confidences >= lo) & (confidences < hi)
+        mask = (confidences >= lo) & (confidences < hi)
         if mask.sum() == 0:
             continue
-        bin_conf = confidences[mask].mean()
-        bin_acc  = accuracies[mask].mean()
-        ece     += (mask.sum() / N) * abs(bin_conf - bin_acc)
+        bin_conf = float(confidences[mask].mean())
+        bin_acc  = float(accuracies[mask].mean())
+        ece += (mask.sum() / N) * abs(bin_conf - bin_acc)
 
     return float(ece)

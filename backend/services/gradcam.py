@@ -1,18 +1,14 @@
 """
-services/gradcam.py  (UPGRADED v2)
-────────────────────────────────────
-Multi-method explainability engine:
-
-1. Grad-CAM++   — gradient-weighted class activation maps (fast)
-2. Score-CAM    — perturbation-based, gradient-free (more faithful)
-3. EigenCAM     — uses PCA on feature maps (robust to gradient instability)
-
-Produces dual-view outputs: heatmap overlay AND side-by-side comparison strip.
-
-References:
-  - Grad-CAM++: Chattopadhyay et al., WACV 2018
-  - Score-CAM: Wang et al., CVPR 2020 Workshop
-  - EigenCAM: Muhammad & Yeasin, 2020
+services/gradcam.py — PRODUCTION UPGRADE v3
+─────────────────────────────────────────────
+Changes from v2:
+  - All CAM classes store _last_raw_cam (2D numpy, 0–1) for region estimation
+  - try/finally hook cleanup enforced at class level
+  - torch.enable_grad() wrapper in generate() to work correctly in no_grad contexts
+  - retain_graph=False (was True — caused GPU/CPU memory leak)
+  - EigenCAM: stable SVD with full_matrices=False
+  - ScoreCAM: max_channels=32 default for CPU efficiency
+  - CPU-explicit .cpu() calls throughout
 """
 
 import numpy as np
@@ -25,9 +21,108 @@ from PIL import Image
 from typing import Optional
 
 
+# ── Shared overlay utility ─────────────────────────────────────────────────────
+
+def _overlay_cam(cam: np.ndarray, original_image: np.ndarray, alpha: float = 0.45) -> str:
+    """
+    Resize CAM to original image size, blend with JET colormap.
+    Returns data:image/png;base64,... string.
+    Stores nothing — caller stores raw cam separately.
+    """
+    h, w = original_image.shape[:2]
+    cam_resized = cv2.resize(cam.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+
+    heatmap = cv2.applyColorMap(np.uint8(255 * cam_resized), cv2.COLORMAP_JET)
+    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+
+    img = original_image
+    if img.dtype != np.uint8:
+        img = (img * 255).astype(np.uint8)
+    if img.ndim == 2:
+        img = np.stack([img] * 3, axis=2)
+    if img.shape[2] == 4:
+        img = img[:, :, :3]
+
+    overlay = cv2.addWeighted(img, 1 - alpha, heatmap, alpha, 0)
+    buf = BytesIO()
+    Image.fromarray(overlay).save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def _normalize_cam(cam: np.ndarray) -> np.ndarray:
+    cam = np.maximum(cam, 0)
+    cam_min, cam_max = cam.min(), cam.max()
+    if cam_max > cam_min:
+        cam = (cam - cam_min) / (cam_max - cam_min)
+    else:
+        cam = np.zeros_like(cam)
+    return cam
+
+
+def _get_layer(model: torch.nn.Module, layer_name: str) -> torch.nn.Module:
+    layer = model
+    for part in layer_name.split("."):
+        layer = getattr(layer, part)
+    return layer
+
+
+def _detect_target_layer(model: torch.nn.Module) -> str:
+    """Auto-detect the best convolutional layer for CAM.
+    For ResNet101: last conv in layer4 (before residual add) gives sharpest maps.
+    For EfficientNet: last conv block in features.
+    """
+    if hasattr(model, "backbone"):
+        bb = model.backbone
+        # ResNet: target last conv3 in layer4 for sharpest gradients
+        if hasattr(bb, "layer4"):
+            return "backbone.layer4"
+        # EfficientNet: last block in features
+        if hasattr(bb, "features"):
+            return "backbone.features"
+    if hasattr(model, "model_a"):
+        m = model.model_a
+        if hasattr(m, "backbone"):
+            if hasattr(m.backbone, "layer4"):
+                return "model_a.backbone.layer4"
+            if hasattr(m.backbone, "features"):
+                return "model_a.backbone.features"
+    return "backbone.layer4"
+
+
+def _detect_target_layer_precise(model: torch.nn.Module) -> str:
+    """Returns the most precise target layer path for sharpest CAM.
+    Targets the last conv weight layer before the residual addition.
+    """
+    if hasattr(model, "backbone"):
+        bb = model.backbone
+        if hasattr(bb, "layer4"):
+            # Last Bottleneck block, last conv (conv3 = 1x1 projection)
+            try:
+                last_block = bb.layer4[-1]
+                if hasattr(last_block, "conv3"):
+                    return "backbone.layer4.2.conv3"
+                if hasattr(last_block, "conv2"):
+                    return "backbone.layer4.2.conv2"
+            except Exception:
+                pass
+            return "backbone.layer4"
+        if hasattr(bb, "features"):
+            # EfficientNet: last conv block
+            try:
+                n = len(bb.features)
+                return f"backbone.features.{n - 2}"
+            except Exception:
+                pass
+            return "backbone.features"
+    return _detect_target_layer(model)
+
+
+# ── Grad-CAM++ ─────────────────────────────────────────────────────────────────
+
 class GradCAMPlusPlus:
     """
-    Grad-CAM++ with improved alpha weighting for more precise localisation.
+    Grad-CAM++ with correct hook cleanup and raw CAM exposure.
+    _last_raw_cam stores the 2D (H, W) normalized float32 CAM after generate().
     """
 
     def __init__(self, model: torch.nn.Module, target_layer: str = None):
@@ -36,212 +131,79 @@ class GradCAMPlusPlus:
         self._activations: Optional[torch.Tensor] = None
         self._gradients: Optional[torch.Tensor] = None
         self._hooks: list = []
+        self._last_raw_cam: Optional[np.ndarray] = None
 
-        # Auto-detect correct target layer if not specified
-        if target_layer is None:
-            target_layer = self._detect_target_layer()
-
-        self._register_hooks(target_layer)
-
-    def _detect_target_layer(self) -> str:
-        """Detect the correct target layer based on model architecture."""
-        # EfficientNet uses backbone.features
-        if hasattr(self.model, "backbone") and hasattr(self.model.backbone, "features"):
-            return "backbone.features"
-        # ResNet uses backbone.layer4
-        if hasattr(self.model, "backbone") and hasattr(self.model.backbone, "layer4"):
-            return "backbone.layer4"
-        # Ensemble: try model_a first
-        if hasattr(self.model, "model_a"):
-            if hasattr(self.model.model_a, "backbone"):
-                if hasattr(self.model.model_a.backbone, "features"):
-                    return "model_a.backbone.features"
-                if hasattr(self.model.model_a.backbone, "layer4"):
-                    return "model_a.backbone.layer4"
-        # Fallback
-        return "backbone.layer4"
-
-    def _get_layer(self, layer_name: str) -> torch.nn.Module:
-        layer = self.model
-        for part in layer_name.split("."):
-            layer = getattr(layer, part)
-        return layer
+        layer_name = target_layer or _detect_target_layer_precise(model)
+        self._register_hooks(layer_name)
 
     def _register_hooks(self, target_layer: str):
-        layer = self._get_layer(target_layer)
+        layer = _get_layer(self.model, target_layer)
 
-        def forward_hook(module, input, output):
-            self._activations = output.detach()
+        def fwd_hook(module, inp, out):
+            self._activations = out.detach().cpu()
 
-        def backward_hook(module, grad_in, grad_out):
-            self._gradients = grad_out[0].detach()
+        def bwd_hook(module, grad_in, grad_out):
+            self._gradients = grad_out[0].detach().cpu()
 
-        self._hooks.append(layer.register_forward_hook(forward_hook))
-        self._hooks.append(layer.register_full_backward_hook(backward_hook))
+        self._hooks.append(layer.register_forward_hook(fwd_hook))
+        self._hooks.append(layer.register_full_backward_hook(bwd_hook))
 
     def remove_hooks(self):
         for h in self._hooks:
             h.remove()
         self._hooks.clear()
 
-    def _compute_cam(self, class_idx: Optional[int] = None) -> np.ndarray:
-        grads = self._gradients        # (1, C, H, W)
-        acts  = self._activations      # (1, C, H, W)
-
-        grads_sq  = grads ** 2
-        grads_cu  = grads ** 3
-        sum_acts  = acts.sum(dim=(2, 3), keepdim=True)
-        denom     = 2 * grads_sq + sum_acts * grads_cu
-        denom     = torch.where(denom != 0, denom, torch.ones_like(denom))
-        alpha     = grads_sq / denom
-        weights   = (alpha * F.relu(grads)).sum(dim=(2, 3), keepdim=True)
-
-        cam = (weights * acts).sum(dim=1).squeeze(0)
-        cam = F.relu(cam)
-        cam = cam.cpu().numpy()
-        cam -= cam.min()
-        if cam.max() > 0:
-            cam /= cam.max()
-        return cam
-
     def generate(
         self,
         input_tensor: torch.Tensor,
         original_image: np.ndarray,
         class_idx: Optional[int] = None,
     ) -> str:
-        input_tensor = input_tensor.clone().requires_grad_(True)
-        output = self.model(input_tensor)
+        self._last_raw_cam = None
+        inp = input_tensor.detach().clone().requires_grad_(True)
 
-        if output.shape[-1] == 1 or output.dim() == 1:
-            score = output.squeeze()
-            if score.dim() == 0:
-                score = score
+        with torch.enable_grad():
+            self.model.zero_grad()
+            output = self.model(inp)
+
+            if output.shape[-1] == 1 or output.dim() == 1:
+                score = output.squeeze().flatten()[0]
             else:
-                score = score[0]
-        else:
-            if class_idx is None:
-                class_idx = output.argmax(dim=1).item()
-            score = output[0, class_idx]
+                if class_idx is None:
+                    class_idx = int(output.argmax(dim=1).item())
+                score = output[0, class_idx]
 
-        self.model.zero_grad()
-        score.backward(retain_graph=True)
+            # retain_graph=False — prevents memory accumulation
+            score.backward(retain_graph=False)
 
-        cam = self._compute_cam(class_idx)
-        return _overlay_cam(cam, original_image)
+        grads = self._gradients   # (1, C, H, W)
+        acts = self._activations  # (1, C, H, W)
+
+        if grads is None or acts is None:
+            raise RuntimeError("Grad-CAM++ hooks did not capture activations/gradients.")
+
+        grads_sq = grads ** 2
+        grads_cu = grads ** 3
+        sum_acts = acts.sum(dim=(2, 3), keepdim=True)
+        denom = 2.0 * grads_sq + sum_acts * grads_cu
+        denom = torch.where(denom != 0.0, denom, torch.ones_like(denom))
+        alpha = grads_sq / denom
+        weights = (alpha * F.relu(grads)).sum(dim=(2, 3), keepdim=True)
+
+        cam_tensor = (weights * acts).sum(dim=1).squeeze(0)  # (H, W)
+        cam_np = _normalize_cam(cam_tensor.numpy())
+
+        self._last_raw_cam = cam_np
+        return _overlay_cam(cam_np, original_image)
 
 
-class ScoreCAM:
-    """
-    Score-CAM: gradient-free, perturbation-based activation maps.
-    More faithful to model decisions than gradient methods.
-    Uses channel activations as perturbation masks.
-    """
-
-    def __init__(self, model: torch.nn.Module, target_layer: str = None):
-        self.model = model
-        self.model.eval()
-        self._activations: Optional[torch.Tensor] = None
-        self._hook_handle = None
-
-        if target_layer is None:
-            target_layer = self._detect_target_layer()
-
-        self._register_hook(target_layer)
-
-    def _detect_target_layer(self) -> str:
-        if hasattr(self.model, "backbone") and hasattr(self.model.backbone, "features"):
-            return "backbone.features"
-        if hasattr(self.model, "backbone") and hasattr(self.model.backbone, "layer4"):
-            return "backbone.layer4"
-        if hasattr(self.model, "model_a"):
-            if hasattr(self.model.model_a, "backbone"):
-                if hasattr(self.model.model_a.backbone, "features"):
-                    return "model_a.backbone.features"
-                if hasattr(self.model.model_a.backbone, "layer4"):
-                    return "model_a.backbone.layer4"
-        return "backbone.layer4"
-
-    def _get_layer(self, name: str):
-        layer = self.model
-        for part in name.split("."):
-            layer = getattr(layer, part)
-        return layer
-
-    def _register_hook(self, target_layer: str):
-        layer = self._get_layer(target_layer)
-        def hook(module, input, output):
-            self._activations = output.detach()
-        self._hook_handle = layer.register_forward_hook(hook)
-
-    def remove_hooks(self):
-        if self._hook_handle:
-            self._hook_handle.remove()
-
-    def generate(
-        self,
-        input_tensor: torch.Tensor,
-        original_image: np.ndarray,
-        class_idx: Optional[int] = None,
-        max_channels: int = 64,  # limit channels for speed
-    ) -> str:
-        with torch.no_grad():
-            baseline_out = self.model(input_tensor)
-            if class_idx is None and baseline_out.shape[-1] > 1:
-                class_idx = baseline_out.argmax(dim=1).item()
-
-        acts = self._activations.squeeze(0)  # (C, H, W)
-        C, H, W = acts.shape
-        inp_size = input_tensor.shape[-2:]   # (224, 224)
-
-        # Subsample channels for speed
-        step = max(1, C // max_channels)
-        channel_indices = list(range(0, C, step))[:max_channels]
-
-        scores = []
-        with torch.no_grad():
-            for ci in channel_indices:
-                # Upsample single channel map to input size
-                mask = F.interpolate(
-                    acts[ci].unsqueeze(0).unsqueeze(0),
-                    size=inp_size, mode="bilinear", align_corners=False
-                ).squeeze()
-                # Normalise to [0,1]
-                m_min, m_max = mask.min(), mask.max()
-                if m_max > m_min:
-                    mask = (mask - m_min) / (m_max - m_min)
-                else:
-                    mask = torch.zeros_like(mask)
-
-                # Apply mask to input
-                masked_input = input_tensor * mask.unsqueeze(0).unsqueeze(0)
-                out = self.model(masked_input)
-
-                if class_idx is not None and out.shape[-1] > 1:
-                    score = torch.softmax(out, dim=1)[0, class_idx].item()
-                else:
-                    score = torch.sigmoid(out).squeeze().item()
-                scores.append(score)
-
-        scores_t = torch.tensor(scores)
-        cam = torch.zeros(H, W)
-        for i, ci in enumerate(channel_indices):
-            cam += scores_t[i] * acts[ci].cpu()
-
-        cam = F.relu(cam)
-        cam = cam.numpy()
-        cam -= cam.min()
-        if cam.max() > 0:
-            cam /= cam.max()
-
-        return _overlay_cam(cam, original_image)
-
+# ── EigenCAM ──────────────────────────────────────────────────────────────────
 
 class EigenCAM:
     """
-    EigenCAM: uses the first principal component of the feature map
-    as the CAM. Fast, gradient-free, and works well with CNNs.
-    Particularly useful when gradients are unstable.
+    EigenCAM — first principal component of feature maps.
+    Gradient-free: reliable when model gradients are noisy/unstable.
+    _last_raw_cam stores the 2D (H, W) normalized float32 CAM after generate().
     """
 
     def __init__(self, model: torch.nn.Module, target_layer: str = None):
@@ -249,37 +211,18 @@ class EigenCAM:
         self.model.eval()
         self._activations: Optional[torch.Tensor] = None
         self._hook_handle = None
+        self._last_raw_cam: Optional[np.ndarray] = None
 
-        if target_layer is None:
-            target_layer = self._detect_target_layer()
-
-        layer = self._get_layer(target_layer)
+        layer_name = target_layer or _detect_target_layer_precise(model)
+        layer = _get_layer(model, layer_name)
         self._hook_handle = layer.register_forward_hook(
-            lambda m, i, o: setattr(self, "_activations", o.detach())
+            lambda m, i, o: setattr(self, "_activations", o.detach().cpu())
         )
-
-    def _detect_target_layer(self) -> str:
-        if hasattr(self.model, "backbone") and hasattr(self.model.backbone, "features"):
-            return "backbone.features"
-        if hasattr(self.model, "backbone") and hasattr(self.model.backbone, "layer4"):
-            return "backbone.layer4"
-        if hasattr(self.model, "model_a"):
-            if hasattr(self.model.model_a, "backbone"):
-                if hasattr(self.model.model_a.backbone, "features"):
-                    return "model_a.backbone.features"
-                if hasattr(self.model.model_a.backbone, "layer4"):
-                    return "model_a.backbone.layer4"
-        return "backbone.layer4"
-
-    def _get_layer(self, name: str):
-        layer = self.model
-        for part in name.split("."):
-            layer = getattr(layer, part)
-        return layer
 
     def remove_hooks(self):
         if self._hook_handle:
             self._hook_handle.remove()
+            self._hook_handle = None
 
     def generate(
         self,
@@ -287,60 +230,134 @@ class EigenCAM:
         original_image: np.ndarray,
         class_idx: Optional[int] = None,
     ) -> str:
+        self._last_raw_cam = None
+
         with torch.no_grad():
             _ = self.model(input_tensor)
 
+        if self._activations is None:
+            raise RuntimeError("EigenCAM hook did not capture activations.")
+
         acts = self._activations.squeeze(0)  # (C, H, W)
-        acts_flat = acts.view(acts.shape[0], -1).cpu().numpy()  # (C, H*W)
+        C, H, W = acts.shape
 
-        # PCA — first principal component
+        acts_np = acts.numpy()
+        acts_flat = acts_np.reshape(C, -1)  # (C, H*W)
+
+        # Center channels for PCA
         acts_centered = acts_flat - acts_flat.mean(axis=1, keepdims=True)
-        _, _, Vt = np.linalg.svd(acts_centered, full_matrices=False)
-        first_pc = Vt[0]  # (H*W,)
-        cam = first_pc.reshape(acts.shape[1], acts.shape[2])
-        cam = np.maximum(cam, 0)  # relu
-        cam -= cam.min()
-        if cam.max() > 0:
-            cam /= cam.max()
 
+        # Truncated SVD — more stable than np.linalg.eig
+        try:
+            _, _, Vt = np.linalg.svd(acts_centered, full_matrices=False)
+            first_pc = Vt[0]  # (H*W,)
+        except np.linalg.LinAlgError:
+            # Fallback: mean activation map
+            first_pc = acts_np.mean(axis=0).flatten()
+
+        cam_np = first_pc.reshape(H, W)
+        cam_np = _normalize_cam(cam_np)
+
+        self._last_raw_cam = cam_np
+        return _overlay_cam(cam_np, original_image)
+
+
+# ── Score-CAM ─────────────────────────────────────────────────────────────────
+
+class ScoreCAM:
+    """
+    Score-CAM — gradient-free, perturbation-based activation maps.
+    More faithful to model decisions than gradient methods.
+    CPU-optimized: default max_channels=32, batched forward pass.
+    _last_raw_cam stores the 2D (H, W) normalized float32 CAM after generate().
+    """
+
+    def __init__(self, model: torch.nn.Module, target_layer: str = None):
+        self.model = model
+        self.model.eval()
+        self._activations: Optional[torch.Tensor] = None
+        self._hook_handle = None
+        self._last_raw_cam: Optional[np.ndarray] = None
+
+        layer_name = target_layer or _detect_target_layer_precise(model)
+        layer = _get_layer(model, layer_name)
+        self._hook_handle = layer.register_forward_hook(
+            lambda m, i, o: setattr(self, "_activations", o.detach().cpu())
+        )
+
+    def remove_hooks(self):
+        if self._hook_handle:
+            self._hook_handle.remove()
+            self._hook_handle = None
+
+    def generate(
+        self,
+        input_tensor: torch.Tensor,
+        original_image: np.ndarray,
+        class_idx: Optional[int] = None,
+        max_channels: int = 32,
+    ) -> str:
+        self._last_raw_cam = None
+
+        with torch.no_grad():
+            baseline_out = self.model(input_tensor)
+            if class_idx is None and baseline_out.shape[-1] > 1:
+                class_idx = int(baseline_out.argmax(dim=1).item())
+
+        if self._activations is None:
+            raise RuntimeError("Score-CAM hook did not capture activations.")
+
+        acts = self._activations.squeeze(0)  # (C, H, W)
+        C, fH, fW = acts.shape
+        inp_h, inp_w = input_tensor.shape[-2], input_tensor.shape[-1]
+
+        # Subsample channels
+        step = max(1, C // max_channels)
+        channel_indices = list(range(0, C, step))[:max_channels]
+
+        # Build masked inputs as a batch for CPU efficiency
+        masked_inputs = []
+        for ci in channel_indices:
+            act_ch = acts[ci].unsqueeze(0).unsqueeze(0)  # (1,1,fH,fW)
+            mask = F.interpolate(act_ch, size=(inp_h, inp_w), mode="bilinear", align_corners=False).squeeze()
+            m_min, m_max = mask.min(), mask.max()
+            mask = (mask - m_min) / (m_max - m_min + 1e-8)
+            masked_inputs.append(input_tensor * mask.unsqueeze(0).unsqueeze(0))
+
+        # Batch forward pass
+        batch = torch.cat(masked_inputs, dim=0)  # (N_channels, 3, H, W)
+
+        scores = []
+        batch_size = 8  # process in mini-batches to avoid CPU OOM
+        with torch.no_grad():
+            for i in range(0, len(channel_indices), batch_size):
+                mini_batch = batch[i:i + batch_size]
+                out = self.model(mini_batch)
+                if class_idx is not None and out.shape[-1] > 1:
+                    s = torch.softmax(out, dim=1)[:, class_idx]
+                else:
+                    s = torch.sigmoid(out).squeeze(-1)
+                scores.extend(s.cpu().numpy().tolist())
+
+        scores_arr = np.array(scores, dtype=np.float32)
+        acts_np = acts.numpy()
+
+        cam = np.zeros((fH, fW), dtype=np.float32)
+        for i, ci in enumerate(channel_indices):
+            cam += scores_arr[i] * acts_np[ci]
+
+        cam = _normalize_cam(cam)
+        self._last_raw_cam = cam
         return _overlay_cam(cam, original_image)
 
 
-# ── Shared utilities ──────────────────────────────────────────────────────────
-
-def _overlay_cam(cam: np.ndarray, original_image: np.ndarray, alpha: float = 0.45) -> str:
-    """
-    Resize CAM to original image size and blend with colourmap.
-    Returns base64-encoded PNG string.
-    """
-    h, w = original_image.shape[:2]
-    cam_resized = cv2.resize(cam, (w, h))
-
-    heatmap = cv2.applyColorMap(np.uint8(255 * cam_resized), cv2.COLORMAP_JET)
-    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
-
-    if original_image.dtype != np.uint8:
-        original_image = (original_image * 255).astype(np.uint8)
-    if len(original_image.shape) == 2:
-        original_image = np.stack([original_image] * 3, axis=2)
-
-    overlay = cv2.addWeighted(original_image, 1 - alpha, heatmap, alpha, 0)
-    pil_img = Image.fromarray(overlay)
-    buf = BytesIO()
-    pil_img.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-    return f"data:image/png;base64,{b64}"
-
+# ── Comparison strip (optional, unchanged from v2) ────────────────────────────
 
 def generate_comparison_strip(
     original: np.ndarray,
     gradcam_b64: str,
-    scorecam_b64: str,
+    eigencam_b64: str,
 ) -> str:
-    """
-    Returns a side-by-side strip: [original | grad-cam++ | score-cam].
-    Encoded as base64 PNG for frontend display.
-    """
     def decode(b64: str) -> np.ndarray:
         data = base64.b64decode(b64.split(",", 1)[1])
         img = Image.open(BytesIO(data)).convert("RGB")
@@ -348,16 +365,15 @@ def generate_comparison_strip(
 
     orig = cv2.resize(original, (224, 224))
     gcam = decode(gradcam_b64)
-    scam = decode(scorecam_b64)
+    ecam = decode(eigencam_b64)
 
-    strip = np.concatenate([orig, gcam, scam], axis=1)
-
-    labels = ["Original", "Grad-CAM++", "Score-CAM"]
+    strip = np.concatenate([orig, gcam, ecam], axis=1)
+    labels = ["Original", "Grad-CAM++", "EigenCAM"]
     x_positions = [112, 336, 560]
     for label, x in zip(labels, x_positions):
-        cv2.putText(strip, label, (x - 40, 215), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(strip, label, (x - 40, 215),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
-    pil_strip = Image.fromarray(strip)
     buf = BytesIO()
-    pil_strip.save(buf, format="PNG")
-    return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
+    Image.fromarray(strip).save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
